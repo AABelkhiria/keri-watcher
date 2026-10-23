@@ -1,0 +1,11 @@
+# Cargo build output
+/target/
+
+# Rustfmt backups and coverage profiles
+*.rs.bk
+*.profraw
+
+# Editors and OS
+.DS_Store
+.idea/
+.vscode/

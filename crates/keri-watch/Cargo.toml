@@ -1,0 +1,21 @@
+[package]
+name = "keri-watch"
+version.workspace = true
+description = "A KERI watcher's decisions as pure functions: when to poll each observed identifier"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+documentation = "https://docs.rs/keri-watch"
+readme = "README.md"
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+keri-protocol.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+
+[lints]
+workspace = true

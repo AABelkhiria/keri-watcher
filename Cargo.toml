@@ -1,0 +1,38 @@
+[workspace]
+resolver = "3"
+members = ["crates/keri-watch"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97"
+license = "Apache-2.0 OR MIT"
+repository = "https://github.com/AABelkhiria/keri-watcher"
+keywords = ["keri", "watcher", "key-state", "duplicity", "identity"]
+categories = ["cryptography"]
+
+[workspace.dependencies]
+keri-protocol = "0.2.0"
+
+proptest = { version = "1.11.0", default-features = false, features = ["std"] }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+unreachable_pub = "warn"
+unused_must_use = "deny"
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+cargo = { level = "deny", priority = -1 }
+allow_attributes = "deny"
+dbg_macro = "deny"
+expect_used = "deny"
+indexing_slicing = "deny"
+panic = "deny"
+print_stderr = "deny"
+print_stdout = "deny"
+todo = "deny"
+unimplemented = "deny"
+unwrap_used = "deny"

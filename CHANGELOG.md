@@ -1,0 +1,10 @@
+# Changelog
+
+> Following [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
+> and [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+### Added
+
+- `keri-watch`: poll planning, deciding when each observed identifier is due to be polled.

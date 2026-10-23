@@ -1,0 +1,3 @@
+# `syn` 2 and 3 coexist: serde_derive builds with `syn` 3 while curve25519-dalek-derive still builds
+# with `syn` 2. Both are proc-macro crates, so the duplicate costs compile time only.
+allowed-duplicate-crates = ["syn"]
