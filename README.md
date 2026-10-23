@@ -14,7 +14,7 @@ needs.
 
 | Crate | Purpose |
 |---|---|
-| `keri-watch` | The watcher's decisions as pure functions over explicit inputs: when to poll each observed identifier |
+| `keri-watch` | The watcher's decisions as pure functions over explicit inputs: when to poll each observed identifier, and which witnesses to ask first |
 
 ## Prerequisites
 

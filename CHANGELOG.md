@@ -8,3 +8,4 @@
 ### Added
 
 - `keri-watch`: poll planning, deciding when each observed identifier is due to be polled.
+- `keri-watch`: witness health, tracking how each witness answers and ordering witnesses to ask.

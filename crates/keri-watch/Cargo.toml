@@ -1,7 +1,7 @@
 [package]
 name = "keri-watch"
 version.workspace = true
-description = "A KERI watcher's decisions as pure functions: when to poll each observed identifier"
+description = "A KERI watcher's decisions as pure functions: when to poll, and which witnesses to ask first"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
