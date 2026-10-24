@@ -1,0 +1,32 @@
+[package]
+name = "keri-watcher"
+version.workspace = true
+description = "A KERI watcher: keeps the key event logs it is sent and answers queries about them over HTTP"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+documentation = "https://docs.rs/keri-watcher"
+readme = "README.md"
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+axum.workspace = true
+chrono.workspace = true
+keri-cesr.workspace = true
+keri-kel.workspace = true
+keri-protocol.workspace = true
+keri-store-redb.workspace = true
+serde.workspace = true
+tokio.workspace = true
+toml.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+http-body-util.workspace = true
+tower.workspace = true
+
+[lints]
+workspace = true

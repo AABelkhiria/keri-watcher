@@ -1,0 +1,225 @@
+//! What the watcher does with what it is sent: every message goes through a keri-kel [`Kevery`]
+//! on the redb store, and queries are answered from what it holds.
+//!
+//! A message keri-kel refuses is logged and skipped; the rest of the stream is still processed.
+//! Escrows are processed after each stream. A query answered only once its escrow is processed
+//! has no one to send the answer to yet, so the answer is logged and dropped.
+
+use std::sync::{Mutex, MutexGuard, PoisonError};
+
+use keri_kel::{Answer, KelError, Kevery};
+use keri_protocol::attachment::SignedMessageBuilder;
+use keri_protocol::event::kind::EventKind;
+use keri_protocol::event::reply::route::ReplyRoute;
+use keri_protocol::event::{Timestamp, TimestampError};
+use keri_protocol::stream::{Message, parse_stream};
+use keri_store_redb::RedbStore;
+use tracing::{debug, info};
+
+use crate::config::Config;
+use crate::error::WatcherError;
+use crate::identity::Identity;
+
+/// Where the watcher reads the time from.
+pub type Clock = Box<dyn Fn() -> Result<Timestamp, TimestampError> + Send + Sync>;
+
+/// Reads the system clock.
+///
+/// # Errors
+///
+/// Returns [`TimestampError`] if the formatted time is not a valid timestamp.
+pub fn system_clock() -> Result<Timestamp, TimestampError> {
+    Timestamp::parse(&chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.6f+00:00").to_string())
+}
+
+/// What became of the messages in a stream.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct Ingested {
+    /// Messages keri-kel accepted, escrowed or found duplicate.
+    pub processed: usize,
+    /// Messages keri-kel refused.
+    pub refused: usize,
+    /// Escrowed messages processed after the stream.
+    pub unescrowed: usize,
+}
+
+/// What a query is answered with.
+#[derive(Debug)]
+pub enum QueryOutcome {
+    /// The answer, as a CESR stream: the replayed events, or a key state notice signed by the
+    /// watcher.
+    Answered(Vec<u8>),
+    /// The log does not hold what the query asks for yet.
+    NotFound,
+    /// The query asks for a mailbox, which the watcher does not serve.
+    Mailbox,
+    /// keri-kel refused the query.
+    Refused(KelError),
+}
+
+/// A watcher: its identity, its key event logs, and its clock.
+pub struct Watcher {
+    identity: Identity,
+    kevery: Mutex<Kevery<RedbStore>>,
+    clock: Clock,
+}
+
+impl Watcher {
+    /// Opens the watcher `config` describes: its identity and its database, both created on first
+    /// start.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`Identity::load_or_create`] and [`Config::trust`], and
+    /// [`WatcherError::Store`] when the database cannot be opened.
+    pub fn open(config: &Config) -> Result<Self, WatcherError> {
+        let identity = Identity::load_or_create(&config.identity_path())?;
+        let store = RedbStore::create(&config.database).map_err(|source| WatcherError::Store { source })?;
+        let kevery = Kevery::with_store(store).trusting(config.trust()?);
+        Ok(Self::new(identity, kevery, Box::new(system_clock)))
+    }
+
+    /// Makes a watcher of an identity, a [`Kevery`] and a clock.
+    #[must_use]
+    pub fn new(identity: Identity, kevery: Kevery<RedbStore>, clock: Clock) -> Self {
+        Self {
+            identity,
+            kevery: Mutex::new(kevery),
+            clock,
+        }
+    }
+
+    /// Returns the watcher's identity.
+    #[must_use]
+    pub const fn identity(&self) -> &Identity {
+        &self.identity
+    }
+
+    /// Processes every message in a CESR stream, then the escrows.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WatcherError::Stream`] when `stream` is not a CESR stream, and
+    /// [`WatcherError::Kel`] when keri-kel fails for a reason other than refusing a message.
+    pub fn ingest(&self, stream: &[u8]) -> Result<Ingested, WatcherError> {
+        let messages = parse_stream(stream).map_err(|source| WatcherError::Stream { source })?;
+        let now = self.now()?;
+        let mut kevery = self.kevery();
+        let mut ingested = Ingested::default();
+        for message in &messages {
+            match kevery.process(message, &now) {
+                Ok(processed) => {
+                    debug!(said = message.event().said(), ?processed, "processed");
+                    ingested.processed += 1;
+                }
+                Err(error @ KelError::Store { .. }) => return Err(WatcherError::kel(error)),
+                Err(error) => {
+                    debug!(said = message.event().said(), %error, "refused");
+                    ingested.refused += 1;
+                }
+            }
+        }
+        ingested.unescrowed = kevery.process_escrows(&now).map_err(WatcherError::kel)?;
+        drop_answers(&mut kevery);
+        Ok(ingested)
+    }
+
+    /// Answers one query.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WatcherError::Stream`] when `stream` is not a CESR stream,
+    /// [`WatcherError::NotAQuery`] when it is not a single query, [`WatcherError::Kel`] when
+    /// keri-kel fails for a reason other than refusing it, and [`WatcherError::Answer`] when the
+    /// answer cannot be written.
+    pub fn query(&self, stream: &[u8]) -> Result<QueryOutcome, WatcherError> {
+        let message = single_query(stream)?;
+        let now = self.now()?;
+        let answered = {
+            let mut kevery = self.kevery();
+            let processed = match kevery.process(&message, &now) {
+                Ok(processed) => processed,
+                Err(error @ KelError::Store { .. }) => return Err(WatcherError::kel(error)),
+                Err(error) => return Ok(QueryOutcome::Refused(error)),
+            };
+            let said = message.event().said();
+            let mut answers = kevery.take_answers();
+            let answered = answers
+                .iter()
+                .position(|answered| answered.query().said() == said)
+                .map(|position| answers.swap_remove(position));
+            if answered.is_none() {
+                debug!(?said, ?processed, "query not answered");
+            }
+            answered
+        };
+        let Some(answered) = answered else {
+            return Ok(QueryOutcome::NotFound);
+        };
+        match answered.into_answer() {
+            Answer::Replay { events, delegator, .. } => {
+                let mut replay = Vec::new();
+                for logged in events.iter().chain(&delegator) {
+                    replay.extend(logged.replay().map_err(WatcherError::answer)?);
+                }
+                Ok(QueryOutcome::Answered(replay))
+            }
+            Answer::KeyState(state) => {
+                let reply = ReplyRoute::KeyStateNotice {
+                    source: self.identity.prefix().clone(),
+                    state,
+                }
+                .to_reply(now)?;
+                let signed = SignedMessageBuilder::new(reply.serialized())
+                    .receipt_couples(vec![self.identity.sign(reply.raw())?])
+                    .build()?;
+                Ok(QueryOutcome::Answered(signed.into_bytes()))
+            }
+            Answer::Mailbox { .. } => Ok(QueryOutcome::Mailbox),
+            // An answer kind keri-kel adds later is not served until the watcher learns it.
+            _ => Ok(QueryOutcome::NotFound),
+        }
+    }
+
+    fn now(&self) -> Result<Timestamp, WatcherError> {
+        (self.clock)().map_err(|source| WatcherError::Clock { source })
+    }
+
+    fn kevery(&self) -> MutexGuard<'_, Kevery<RedbStore>> {
+        // Kevery's state is in its store, written a transaction at a time, so a panic while it was
+        // held leaves nothing half-done.
+        self.kevery.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+fn single_query(stream: &[u8]) -> Result<Message, WatcherError> {
+    let mut messages = parse_stream(stream)
+        .map_err(|source| WatcherError::Stream { source })?
+        .into_iter();
+    let (Some(message), None) = (messages.next(), messages.next()) else {
+        return Err(WatcherError::NotAQuery);
+    };
+    if message.event().event_kind().ok().flatten() != Some(EventKind::Query) {
+        return Err(WatcherError::NotAQuery);
+    }
+    Ok(message)
+}
+
+fn drop_answers(kevery: &mut Kevery<RedbStore>) {
+    for answered in kevery.take_answers() {
+        info!(
+            query = answered.query().said(),
+            requester = ?answered.requester(),
+            "answer to an escrowed query dropped"
+        );
+    }
+}
+
+impl std::fmt::Debug for Watcher {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Watcher")
+            .field("identity", &self.identity)
+            .finish_non_exhaustive()
+    }
+}

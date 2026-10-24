@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/keri-store-redb", "crates/keri-watch"]
+members = ["crates/keri-store-redb", "crates/keri-watch", "crates/keri-watcher"]
 
 [workspace.package]
 version = "0.1.0"
@@ -15,9 +15,20 @@ categories = ["cryptography"]
 keri-cesr = { version = "0.1.0", features = ["crypto"] }
 keri-kel = "0.1.0"
 keri-protocol = "0.2.0"
+keri-store-redb = { version = "0.1.0", path = "crates/keri-store-redb" }
 redb = "4.4.0"
 
+axum = { version = "0.8.9", default-features = false, features = ["http1", "tokio"] }
+chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
+serde = { version = "1.0.228", features = ["derive"] }
+tokio = { version = "1.54.1", features = ["macros", "net", "rt-multi-thread", "signal"] }
+toml = { version = "1.1.8", default-features = false, features = ["parse", "serde"] }
+tracing = { version = "0.1.44", default-features = false, features = ["std"] }
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+
+http-body-util = "0.1.5"
 proptest = { version = "1.11.0", default-features = false, features = ["std"] }
+tower = { version = "0.5.3", default-features = false, features = ["util"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
