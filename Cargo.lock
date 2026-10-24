@@ -399,6 +399,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "keri-kel"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e202e4b5b5592a7ac51c52af5836b22e9ebe6a61c010bb79ad3c8ed802c2814a"
+dependencies = [
+ "keri-cesr",
+ "keri-protocol",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "keri-protocol"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -406,6 +418,17 @@ checksum = "ee71975cf4ac02e9e9360a57a1d145bd6d3f1bb9ac286970e9f3d8ed2526f131"
 dependencies = [
  "keri-cesr",
  "serde_json",
+]
+
+[[package]]
+name = "keri-store-redb"
+version = "0.1.0"
+dependencies = [
+ "keri-cesr",
+ "keri-kel",
+ "keri-protocol",
+ "proptest",
+ "redb",
 ]
 
 [[package]]
@@ -574,6 +597,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "redb"
+version = "4.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "39178e0a867f9e3eaa6292a4ab1dd3613f2519c5b564341e1e7b29b270736cc4"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "regex-syntax"
 version = "0.8.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -635,6 +667,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4148590afebada386688f18773da617792bf2ef03ffc1e4cbd2b1d45b023e0ba"
 dependencies = [
  "serde_core",
+ "serde_derive",
 ]
 
 [[package]]

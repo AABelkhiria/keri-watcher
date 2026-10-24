@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/keri-watch"]
+members = ["crates/keri-store-redb", "crates/keri-watch"]
 
 [workspace.package]
 version = "0.1.0"
@@ -12,7 +12,10 @@ keywords = ["keri", "watcher", "key-state", "duplicity", "identity"]
 categories = ["cryptography"]
 
 [workspace.dependencies]
+keri-cesr = { version = "0.1.0", features = ["crypto"] }
+keri-kel = "0.1.0"
 keri-protocol = "0.2.0"
+redb = "4.4.0"
 
 proptest = { version = "1.11.0", default-features = false, features = ["std"] }
 

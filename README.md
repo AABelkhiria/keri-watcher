@@ -14,6 +14,7 @@ needs.
 
 | Crate | Purpose |
 |---|---|
+| `keri-store-redb` | A keri-kel store on redb: the watcher's logs, escrows and replies in one database file |
 | `keri-watch` | The watcher's decisions as pure functions over explicit inputs: when to poll each observed identifier, and which witnesses to ask first |
 
 ## Prerequisites

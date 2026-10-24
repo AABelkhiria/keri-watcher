@@ -1,0 +1,24 @@
+[package]
+name = "keri-store-redb"
+version.workspace = true
+description = "A keri-kel store on redb: key event logs, escrows and replies kept in an embedded database"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+documentation = "https://docs.rs/keri-store-redb"
+readme = "README.md"
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+keri-kel.workspace = true
+keri-protocol.workspace = true
+redb.workspace = true
+
+[dev-dependencies]
+keri-cesr.workspace = true
+proptest.workspace = true
+
+[lints]
+workspace = true
