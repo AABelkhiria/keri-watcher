@@ -10,6 +10,7 @@ results, and acts on what these functions return.
 |---|---|
 | `poll` | When each observed identifier is due to be polled, at a rate that slows while its log is stable |
 | `health` | How each witness has answered, and the order to ask an identifier's witnesses in |
+| `reports` | What an identifier's witnesses report, merged, and which events the local copy lacks |
 
 ## Polling
 
@@ -26,6 +27,13 @@ failures counted. After three failures in a row a witness is unhealthy, until a 
 last failure, when it is worth one more try; one success makes it healthy again. Witnesses are
 asked healthy ones first, the fastest first and unmeasured ones after measured ones, then unhealthy
 ones, the fewest failures in a row first.
+
+## Witness reports
+
+The witnesses' reports about an identifier merge into the highest state, with the witnesses that
+report it and those behind, unless two witnesses report different events at the same sequence
+number, which is duplicity. The local copy then lacks the events from the one after its latest to
+the highest, which the witnesses reporting it can serve.
 
 ## License
 
