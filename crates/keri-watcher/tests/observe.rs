@@ -29,7 +29,8 @@ use keri_store_redb::RedbStore;
 use keri_watch::PollPolicy;
 use keri_watcher::witness::{ClientError, key_state_url, log_url};
 use keri_watcher::{
-    Fetched, Identity, Ingested, Observation, Observer, Poller, Resolution, Resolver, Swept, Watcher, WitnessClient,
+    Fetched, Identity, Ingested, Observation, Observer, Poller, Resolution, Resolver, Sighting, Swept, Watcher,
+    WitnessClient,
 };
 
 const STAMP: &str = "2021-01-01T00:00:00.000000+00:00";
@@ -227,6 +228,20 @@ impl World {
     }
 }
 
+/// What the watcher records of these sources reporting these events, at [`STAMP`].
+fn sightings(reported: &[(IdentifierPrefix, &KeyEvent)]) -> Result<Vec<Sighting>, Failure> {
+    reported
+        .iter()
+        .map(|(source, event)| {
+            Ok(Sighting {
+                said: event.said().qb64()?,
+                source: source.qb64()?,
+                first_seen: Timestamp::parse(STAMP)?,
+            })
+        })
+        .collect()
+}
+
 /// A clock the test sets, starting at [`STAMP`].
 #[derive(Clone)]
 struct Time(Arc<Mutex<DateTime<Utc>>>);
@@ -370,6 +385,14 @@ async fn witnesses_reporting_different_events_are_duplicitous() -> Result<(), Fa
     assert_eq!(sequence_number, 1);
     assert_eq!(conflicting.len(), 2);
     assert_eq!(latest(&watcher, &world.identifier)?, Some(0));
+
+    let recorded = sightings(&[
+        (world.witness(0)?.1, world.event(1)?),
+        (world.witness(1)?.1, &world.contradicting),
+    ])?;
+    assert_eq!(watcher.duplicity(&world.identifier)?, vec![(1, recorded.clone())]);
+    observer.observe(&world.identifier, Duration::from_secs(60)).await?;
+    assert_eq!(watcher.duplicity(&world.identifier)?, vec![(1, recorded)]);
     Ok(())
 }
 
@@ -389,6 +412,16 @@ async fn a_witness_reporting_another_event_than_the_logs_contradicts_it() -> Res
         }
     );
     assert_eq!(latest(&watcher, &world.identifier)?, Some(1));
+    assert_eq!(
+        watcher.duplicity(&world.identifier)?,
+        vec![(
+            1,
+            sightings(&[
+                (watcher.identity().prefix().clone(), world.event(1)?),
+                (world.witness(0)?.1, &world.contradicting),
+            ])?
+        )]
+    );
     Ok(())
 }
 

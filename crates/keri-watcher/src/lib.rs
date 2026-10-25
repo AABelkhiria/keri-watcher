@@ -30,6 +30,7 @@ pub mod witness;
 pub use config::Config;
 pub use error::WatcherError;
 pub use identity::Identity;
+pub use keri_store_redb::Sighting;
 pub use observe::{Observation, Observer};
 pub use poller::Poller;
 pub use resolver::{Resolution, Resolver};

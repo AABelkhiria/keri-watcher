@@ -10,6 +10,7 @@ use keri_protocol::attachment::AttachmentError;
 use keri_protocol::event::EventError;
 use keri_protocol::event::timestamp::TimestampError;
 use keri_protocol::prefix::PrefixError;
+use keri_protocol::said::SaidError;
 use keri_protocol::stream::StreamError;
 use keri_watch::WatchError;
 
@@ -39,10 +40,15 @@ pub enum WatcherError {
         /// Underlying failure.
         source: CryptoError,
     },
-    /// The store could not be opened.
+    /// The store could not be opened, or failed.
     Store {
         /// Underlying failure.
         source: StoreError,
+    },
+    /// A SAID could not be written as qb64.
+    Said {
+        /// Underlying failure.
+        source: SaidError,
     },
     /// The clock gave a time that is not a valid timestamp.
     Clock {
@@ -111,7 +117,8 @@ impl fmt::Display for WatcherError {
             Self::Config { .. } => formatter.write_str("configuration is not valid"),
             Self::Prefix { .. } => formatter.write_str("identifier is not valid"),
             Self::Key { .. } => formatter.write_str("identity key could not be derived or sign"),
-            Self::Store { .. } => formatter.write_str("store could not be opened"),
+            Self::Store { .. } => formatter.write_str("store could not be opened, or failed"),
+            Self::Said { .. } => formatter.write_str("SAID could not be written"),
             Self::Clock { .. } => formatter.write_str("clock gave an invalid timestamp"),
             Self::Stream { .. } => formatter.write_str("body is not a CESR stream"),
             Self::NotAQuery => formatter.write_str("body is not a single query"),
@@ -132,6 +139,7 @@ impl Error for WatcherError {
             Self::Prefix { source } => Some(source),
             Self::Key { source } => Some(source),
             Self::Store { source } => Some(source),
+            Self::Said { source } => Some(source),
             Self::Clock { source } => Some(source),
             Self::Stream { source } => Some(source),
             Self::NotAQuery | Self::Interrupted => None,

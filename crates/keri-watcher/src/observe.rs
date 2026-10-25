@@ -6,6 +6,9 @@
 //! has not reached, it fetches the log from a witness reporting that state and ingests it, asking
 //! from the first event it lacks and, should that not bring it up to date, from the beginning.
 //!
+//! Witnesses reporting different events at the same sequence number, or an event other than the one
+//! the watcher holds, are recorded as duplicity, and nothing is fetched.
+//!
 //! A witness the watcher has no URL for is skipped. A witness that does not answer within the
 //! timeout, or answers with a server error, counts as a failure for its health; one that answers
 //! `404` does not hold the identifier's latest event fully witnessed, and reports nothing.
@@ -13,7 +16,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use keri_kel::KelError;
+use keri_protocol::event::key_state::KeyStateRecord;
 use keri_protocol::prefix::IdentifierPrefix;
 use keri_protocol::said::Said;
 use keri_watch::{HealthPolicy, Merged, Report, WitnessHealth, merge};
@@ -111,10 +114,17 @@ impl<C: WitnessClient> Observer<C> {
         };
         let (reports, contradicting) = self.reports(identifier, &witnesses, now).await?;
         if !contradicting.is_empty() {
-            warn!(?identifier, witnesses = ?contradicting, "witnesses contradict the log");
-            return Ok(Observation::Contradicted {
-                witnesses: contradicting,
-            });
+            let witnesses: Vec<IdentifierPrefix> = contradicting.iter().map(|(witness, _)| witness.clone()).collect();
+            warn!(?identifier, ?witnesses, "witnesses contradict the log");
+            let watcher = Arc::clone(&self.watcher);
+            blocking(move || {
+                for (witness, state) in &contradicting {
+                    watcher.record_contradiction(witness, state)?;
+                }
+                Ok(())
+            })
+            .await?;
+            return Ok(Observation::Contradicted { witnesses });
         }
         let merged = merge(&reports).map_err(|source| WatcherError::Watch { source })?;
         let target = match &merged {
@@ -124,6 +134,13 @@ impl<C: WitnessClient> Observer<C> {
                 conflicting,
             } => {
                 warn!(?identifier, sequence_number, ?conflicting, "witnesses report duplicity");
+                let (watcher, identifier, at, reported) = (
+                    Arc::clone(&self.watcher),
+                    identifier.clone(),
+                    *sequence_number,
+                    conflicting.clone(),
+                );
+                blocking(move || watcher.record_duplicity(&identifier, at, &reported)).await?;
                 return Ok(Observation::Duplicitous {
                     sequence_number: *sequence_number,
                     conflicting: conflicting.clone(),
@@ -153,13 +170,14 @@ impl<C: WitnessClient> Observer<C> {
     }
 
     /// Asks each witness for its key state, healthiest first, returning the states the witnesses
-    /// whose notices were kept report, and the witnesses that contradict the log.
+    /// whose notices were kept report, and the witnesses that contradict the log with the states
+    /// they report.
     async fn reports(
         &mut self,
         identifier: &IdentifierPrefix,
         witnesses: &[(IdentifierPrefix, Option<String>)],
         now: Duration,
-    ) -> Result<(Vec<Report>, Vec<IdentifierPrefix>), WatcherError> {
+    ) -> Result<(Vec<Report>, Vec<(IdentifierPrefix, KeyStateRecord)>), WatcherError> {
         let listed: Vec<IdentifierPrefix> = witnesses.iter().map(|(witness, _)| witness.clone()).collect();
         let mut reports = Vec::new();
         let mut contradicting = Vec::new();
@@ -185,7 +203,7 @@ impl<C: WitnessClient> Observer<C> {
             };
             match notice {
                 Notice::Accepted(state) => reports.push((witness, *state)),
-                Notice::Refused(KelError::KeyStateMismatch) => contradicting.push(witness),
+                Notice::Contradicting(state) => contradicting.push((witness, *state)),
                 Notice::Refused(error) => debug!(?witness, %error, "key state notice refused"),
                 Notice::Unexpected => debug!(?witness, "answer is not a key state notice"),
             }

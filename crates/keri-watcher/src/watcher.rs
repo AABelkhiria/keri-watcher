@@ -19,8 +19,9 @@ use keri_protocol::event::kind::EventKind;
 use keri_protocol::event::reply::ReplyMessage;
 use keri_protocol::event::reply::route::{ReplyRoute, Scheme};
 use keri_protocol::prefix::IdentifierPrefix;
+use keri_protocol::said::Said;
 use keri_protocol::stream::{Message, parse_stream};
-use keri_store_redb::RedbStore;
+use keri_store_redb::{RedbStore, Sighting};
 use tracing::{debug, info};
 
 use crate::config::Config;
@@ -87,8 +88,10 @@ pub enum Notice {
     Accepted(Box<KeyStateRecord>),
     /// It is not a single `/ksn/{witness}` reply from that witness about that identifier.
     Unexpected,
-    /// keri-kel did not keep it; [`KelError::KeyStateMismatch`] means the witness reports an event
-    /// other than the one the watcher holds at that sequence number.
+    /// The witness reports this state, whose latest event is not the one the watcher holds at
+    /// that sequence number; keri-kel did not keep it.
+    Contradicting(Box<KeyStateRecord>),
+    /// keri-kel did not keep it.
     Refused(KelError),
 }
 
@@ -325,9 +328,82 @@ impl Watcher {
                 debug!(?processed, "key state notice not kept");
                 Ok(Notice::Unexpected)
             }
+            Err(KelError::KeyStateMismatch) => Ok(Notice::Contradicting(state)),
             Err(error @ KelError::Store { .. }) => Err(WatcherError::kel(error)),
             Err(error) => Ok(Notice::Refused(error)),
         }
+    }
+
+    /// Records that these sources report different events at `sequence_number` of `identifier`,
+    /// returning how many of them were not recorded before.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WatcherError::Prefix`] or [`WatcherError::Said`] for one that cannot be written as
+    /// qb64, and [`WatcherError::Store`] when the store fails.
+    pub fn record_duplicity(
+        &self,
+        identifier: &IdentifierPrefix,
+        sequence_number: u128,
+        reported: &[(IdentifierPrefix, Said)],
+    ) -> Result<usize, WatcherError> {
+        let now = self.now()?;
+        let sightings = reported
+            .iter()
+            .map(|(source, said)| {
+                Ok(Sighting {
+                    said: said.qb64().map_err(|source| WatcherError::Said { source })?,
+                    source: qb64(source)?,
+                    first_seen: now.clone(),
+                })
+            })
+            .collect::<Result<Vec<_>, WatcherError>>()?;
+        self.kevery()
+            .store()
+            .record_duplicity(&qb64(identifier)?, sequence_number, &sightings)
+            .map_err(|source| WatcherError::Store { source })
+    }
+
+    /// Records that `witness` reports `state`, whose latest event is not the one the watcher holds:
+    /// the watcher's own identifier stands for its log. Returns how many of the two were not
+    /// recorded before.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`Watcher::record_duplicity`], and [`WatcherError::Kel`] when the
+    /// store fails.
+    pub fn record_contradiction(
+        &self,
+        witness: &IdentifierPrefix,
+        state: &KeyStateRecord,
+    ) -> Result<usize, WatcherError> {
+        let identifier = state.identifier();
+        let sequence_number = state.sequence_number();
+        let held = self
+            .kevery()
+            .logged(identifier, sequence_number)
+            .map_err(WatcherError::kel)?
+            .and_then(|logged| logged.event().said().map(Said::from_qb64))
+            .transpose()
+            .map_err(|source| WatcherError::Said { source })?;
+        let mut reported = vec![(witness.clone(), state.said())];
+        if let Some(held) = held {
+            reported.insert(0, (self.identity.prefix().clone(), held));
+        }
+        self.record_duplicity(identifier, sequence_number, &reported)
+    }
+
+    /// Returns the duplicity recorded for `identifier`, by sequence number.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WatcherError::Prefix`] for an identifier that cannot be written as qb64, and
+    /// [`WatcherError::Store`] when the store fails.
+    pub fn duplicity(&self, identifier: &IdentifierPrefix) -> Result<Vec<(u128, Vec<Sighting>)>, WatcherError> {
+        self.kevery()
+            .store()
+            .duplicity(&qb64(identifier)?)
+            .map_err(|source| WatcherError::Store { source })
     }
 
     fn now(&self) -> Result<Timestamp, WatcherError> {
@@ -348,6 +424,10 @@ pub(crate) async fn blocking<T: Send + 'static>(
     tokio::task::spawn_blocking(work)
         .await
         .map_err(|_| WatcherError::Interrupted)?
+}
+
+fn qb64(identifier: &IdentifierPrefix) -> Result<String, WatcherError> {
+    identifier.qb64().map_err(|source| WatcherError::Prefix { source })
 }
 
 fn timestamp(at: DateTime<Utc>) -> Result<Timestamp, WatcherError> {

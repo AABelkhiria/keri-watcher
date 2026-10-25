@@ -54,7 +54,9 @@ Each poll asks every witness the watcher has a location for, healthiest first, f
 key state notice. When the witnesses agree on a state the watcher's log has not reached, it fetches
 the log from a witness reporting that state (`GET /log?pre=&fn=`) and ingests it. Witnesses
 reporting different events at the same sequence number, or an event other than the one the watcher
-holds, are logged as duplicity and nothing is fetched.
+holds, are duplicity: nothing is fetched, and each witness's event is recorded in the database
+with when it was first seen, beside the watcher's own event when it holds one. The watcher never
+replaces an event it has accepted because a witness reports another.
 
 The watcher needs the identifier's log, at least its inception, to know its witnesses, and the
 witnesses' `/loc/scheme` replies to reach them; until it has both, the identifier is skipped.

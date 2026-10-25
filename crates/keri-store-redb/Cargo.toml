@@ -15,6 +15,8 @@ categories.workspace = true
 keri-kel.workspace = true
 keri-protocol.workspace = true
 redb.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 
 [dev-dependencies]
 keri-cesr.workspace = true

@@ -18,15 +18,23 @@
 //! | `oobis` | URL | OOBIs queued for resolution |
 //! | `rpes` | SAID | replies waiting |
 //! | `qnfs` | requester, SAID | queries waiting |
+//! | `dups` | identifier, sequence number | the events reported where duplicity was seen |
 //!
 //! Keys are their parts joined by `.`, as keripy joins its keys; a sequence number or an order is
 //! 32 hexadecimal digits, so a range scan reads a log in sequence order. Values are records as
 //! [`keri_kel::Record`] writes them, readable JSON.
 //!
+//! Beside what a `Kevery` holds, the store keeps the duplicity a watcher sees, which keri-kel does
+//! not: [`RedbStore::record_duplicity`] and [`RedbStore::duplicity`].
+//!
 //! Each store method is one transaction: accepting an event, with moving the events it supersedes
 //! aside, commits together, but the several writes one message causes do not.
 
 #![forbid(unsafe_code)]
+
+mod duplicity;
+
+pub use duplicity::Sighting;
 
 use std::path::Path;
 
@@ -53,8 +61,9 @@ const OBSERVATIONS: Table = TableDefinition::new("obvs");
 const OOBIS: Table = TableDefinition::new("oobis");
 const REPLIES: Table = TableDefinition::new("rpes");
 const QUERIES: Table = TableDefinition::new("qnfs");
+const DUPLICITY: Table = TableDefinition::new("dups");
 
-const TABLES: [Table; 13] = [
+const TABLES: [Table; 14] = [
     KEVERS,
     KELS,
     SUPERSEDED,
@@ -68,6 +77,7 @@ const TABLES: [Table; 13] = [
     OOBIS,
     REPLIES,
     QUERIES,
+    DUPLICITY,
 ];
 
 /// A [`keri_kel::Store`] in a redb database.

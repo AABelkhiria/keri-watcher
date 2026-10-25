@@ -3,7 +3,7 @@
 A [keri-kel](https://crates.io/crates/keri-kel) store on [redb](https://www.redb.org), an embedded
 key-value database: everything a `Kevery` holds, its key event logs, escrows, waiting receipts,
 replies and queries, and the key state notices, end roles, locations and watcher registrations it
-keeps, in one database file.
+keeps, in one database file, with the duplicity a watcher records.
 
 ```rust,no_run
 use keri_kel::Kevery;
@@ -19,7 +19,8 @@ let kevery = Kevery::with_store(RedbStore::create("watcher.redb")?);
 
 One table per kind of record, named after keripy's tables so a dump reads like keripy's: `kevers`,
 `kels`, `sups` (superseded events), `escrows`, `receipts`, `ksns`, `ends`, `locs`, `obvs`, `oobis`,
-`rpes` and `qnfs`. Keys are their parts joined by `.`, as keripy joins its keys, with sequence
+`rpes` and `qnfs`, and `dups`, the duplicity a watcher sees, which keri-kel does not keep: each
+event reported at a sequence number, with its source and when it was first seen. Keys are their parts joined by `.`, as keripy joins its keys, with sequence
 numbers as 32 hexadecimal digits so a log reads in order; values are keri-kel's `Record` encoding,
 readable JSON.
 
