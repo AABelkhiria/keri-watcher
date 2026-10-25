@@ -821,6 +821,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "keri-watcher-systest"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "keri-kel",
+ "keri-protocol",
+ "keri-store-redb",
+ "keri-watch",
+ "keri-watcher",
+ "tokio",
+]
+
+[[package]]
 name = "lazy_static"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

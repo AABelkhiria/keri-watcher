@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/keri-store-redb", "crates/keri-watch", "crates/keri-watcher"]
+members = ["crates/keri-store-redb", "crates/keri-watch", "crates/keri-watcher", "crates/keri-watcher-systest"]
 
 [workspace.package]
 version = "0.1.0"
@@ -17,6 +17,7 @@ keri-kel = "0.1.0"
 keri-protocol = "0.2.0"
 keri-store-redb = { version = "0.1.0", path = "crates/keri-store-redb" }
 keri-watch = { version = "0.1.0", path = "crates/keri-watch" }
+keri-watcher = { version = "0.1.0", path = "crates/keri-watcher" }
 redb = "4.4.0"
 
 axum = { version = "0.8.9", default-features = false, features = ["http1", "tokio"] }

@@ -1,0 +1,22 @@
+[package]
+name = "keri-watcher-systest"
+version.workspace = true
+description = "Opt-in system tests of the watcher against keripy's kli and witnesses"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+axum.workspace = true
+keri-kel.workspace = true
+keri-protocol.workspace = true
+keri-store-redb.workspace = true
+keri-watch.workspace = true
+keri-watcher.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true
