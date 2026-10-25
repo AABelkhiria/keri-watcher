@@ -3,7 +3,9 @@
 //!
 //! [`Config`] is read from a TOML file. [`Identity`] is the watcher's non-transferable key, derived
 //! from a salt kept beside the database. [`Watcher`] processes what it is sent through keri-kel and
-//! answers `logs` and `ksn` queries, and [`http::router`] serves it:
+//! answers `logs` and `ksn` queries, and [`http::router`] serves it. [`Poller`] keeps the
+//! identifiers registrations ask it to observe up to date from their witnesses, through
+//! [`Observer`].
 //!
 //! | Route | |
 //! |---|---|
@@ -17,9 +19,15 @@ pub mod config;
 pub mod error;
 pub mod http;
 pub mod identity;
+pub mod observe;
+pub mod poller;
 pub mod watcher;
+pub mod witness;
 
 pub use config::Config;
 pub use error::WatcherError;
 pub use identity::Identity;
-pub use watcher::{Clock, Ingested, QueryOutcome, Watcher, system_clock};
+pub use observe::{Observation, Observer};
+pub use poller::Poller;
+pub use watcher::{Clock, Ingested, Notice, QueryOutcome, Watcher, Witnessed, system_clock};
+pub use witness::{Fetched, HttpClient, WitnessClient};

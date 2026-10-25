@@ -7,11 +7,14 @@
 
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
-use keri_kel::{Answer, KelError, Kevery};
+use keri_kel::{Answer, KelError, Kevery, Processed};
 use keri_protocol::attachment::SignedMessageBuilder;
+use keri_protocol::event::key_state::KeyStateRecord;
 use keri_protocol::event::kind::EventKind;
-use keri_protocol::event::reply::route::ReplyRoute;
+use keri_protocol::event::reply::ReplyMessage;
+use keri_protocol::event::reply::route::{ReplyRoute, Scheme};
 use keri_protocol::event::{Timestamp, TimestampError};
+use keri_protocol::prefix::IdentifierPrefix;
 use keri_protocol::stream::{Message, parse_stream};
 use keri_store_redb::RedbStore;
 use tracing::{debug, info};
@@ -54,6 +57,28 @@ pub enum QueryOutcome {
     /// The query asks for a mailbox, which the watcher does not serve.
     Mailbox,
     /// keri-kel refused the query.
+    Refused(KelError),
+}
+
+/// What the watcher holds of an identifier: its latest sequence number, and its witnesses with the
+/// URL each can be reached at, when one is known.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Witnessed {
+    /// The latest sequence number accepted.
+    pub sequence_number: u128,
+    /// The current witnesses, each with its `https` URL, else its `http` one.
+    pub witnesses: Vec<(IdentifierPrefix, Option<String>)>,
+}
+
+/// What became of a witness's key state notice.
+#[derive(Debug)]
+pub enum Notice {
+    /// It was kept: the witness reports this state.
+    Accepted(Box<KeyStateRecord>),
+    /// It is not a single `/ksn/{witness}` reply from that witness about that identifier.
+    Unexpected,
+    /// keri-kel did not keep it; [`KelError::KeyStateMismatch`] means the witness reports an event
+    /// other than the one the watcher holds at that sequence number.
     Refused(KelError),
 }
 
@@ -181,6 +206,90 @@ impl Watcher {
         }
     }
 
+    /// Returns the identifiers the watcher is asked to observe: those a registration added and no
+    /// later one cut.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WatcherError::Kel`] when the store fails.
+    pub fn observed(&self) -> Result<Vec<IdentifierPrefix>, WatcherError> {
+        let observations = self
+            .kevery()
+            .observations(self.identity.prefix())
+            .map_err(WatcherError::kel)?;
+        let mut observed: Vec<IdentifierPrefix> = Vec::new();
+        for (_, identifier, record) in observations {
+            if record.enabled() && !observed.contains(&identifier) {
+                observed.push(identifier);
+            }
+        }
+        Ok(observed)
+    }
+
+    /// Returns what the watcher holds of `identifier`, or `None` when it holds no log for it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WatcherError::Kel`] when the store fails.
+    pub fn witnessed(&self, identifier: &IdentifierPrefix) -> Result<Option<Witnessed>, WatcherError> {
+        let kevery = self.kevery();
+        let Some(kever) = kevery.kever(identifier).map_err(WatcherError::kel)? else {
+            return Ok(None);
+        };
+        let mut witnesses = Vec::new();
+        for witness in kever.witnesses() {
+            let mut url = None;
+            for scheme in [Scheme::Https, Scheme::Http] {
+                if let Some(location) = kevery.location(witness, scheme).map_err(WatcherError::kel)? {
+                    url = Some(location.url().to_owned());
+                    break;
+                }
+            }
+            witnesses.push((witness.clone(), url));
+        }
+        Ok(Some(Witnessed {
+            sequence_number: kever.sequence_number(),
+            witnesses,
+        }))
+    }
+
+    /// Offers a witness's answer to a key state request: a `/ksn/{witness}` reply about
+    /// `identifier`, which keri-kel verifies and keeps as it keeps any notice.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WatcherError::Kel`] when keri-kel fails for a reason other than refusing it.
+    pub fn accept_notice(
+        &self,
+        identifier: &IdentifierPrefix,
+        witness: &IdentifierPrefix,
+        answer: &[u8],
+    ) -> Result<Notice, WatcherError> {
+        let Ok(message) = Message::from_bytes(answer) else {
+            return Ok(Notice::Unexpected);
+        };
+        let route =
+            ReplyMessage::from_serialized(message.event().clone()).and_then(|reply| ReplyRoute::from_reply(&reply));
+        let state = match route {
+            Ok(ReplyRoute::KeyStateNotice { source, state })
+                if &source == witness && state.identifier() == identifier =>
+            {
+                state
+            }
+            _ => return Ok(Notice::Unexpected),
+        };
+        let now = self.now()?;
+        match self.kevery().process(&message, &now) {
+            Ok(Processed::KeyStateAccepted) => Ok(Notice::Accepted(state)),
+            Ok(processed) => {
+                debug!(?processed, "key state notice not kept");
+                Ok(Notice::Unexpected)
+            }
+            Err(error @ KelError::Store { .. }) => Err(WatcherError::kel(error)),
+            Err(error) => Ok(Notice::Refused(error)),
+        }
+    }
+
     fn now(&self) -> Result<Timestamp, WatcherError> {
         (self.clock)().map_err(|source| WatcherError::Clock { source })
     }
@@ -190,6 +299,15 @@ impl Watcher {
         // held leaves nothing half-done.
         self.kevery.lock().unwrap_or_else(PoisonError::into_inner)
     }
+}
+
+/// Runs blocking work, keri-kel's and redb's, on tokio's blocking pool.
+pub(crate) async fn blocking<T: Send + 'static>(
+    work: impl FnOnce() -> Result<T, WatcherError> + Send + 'static,
+) -> Result<T, WatcherError> {
+    tokio::task::spawn_blocking(work)
+        .await
+        .map_err(|_| WatcherError::Interrupted)?
 }
 
 fn single_query(stream: &[u8]) -> Result<Message, WatcherError> {

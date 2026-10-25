@@ -8,13 +8,20 @@
 //! # Keep key state notices only from the identifier itself, its witnesses, and these watchers.
 //! # Without it, notices from any source are kept.
 //! trusted_watchers = ["BBilc4-L3tFUnfM_wJr4S4OJanAv_VmF_dJNN6vkf2Ha"]
+//! # How often to poll an observed identifier's witnesses while its log changes; 0 disables
+//! # polling. 60 by default.
+//! poll_interval_seconds = 60
+//! # How long to wait for a witness's answer. 5 by default.
+//! witness_timeout_seconds = 5
 //! ```
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use keri_kel::NoticeTrust;
 use keri_protocol::prefix::IdentifierPrefix;
+use keri_watch::PollPolicy;
 use serde::Deserialize;
 
 use crate::error::WatcherError;
@@ -34,6 +41,21 @@ pub struct Config {
     /// witnesses'; without it, any source's are.
     #[serde(default)]
     pub trusted_watchers: Option<Vec<String>>,
+    /// How often, in seconds, to poll an observed identifier's witnesses while its log changes;
+    /// zero disables polling.
+    #[serde(default = "default_poll_interval")]
+    pub poll_interval_seconds: u64,
+    /// How long, in seconds, to wait for a witness's answer.
+    #[serde(default = "default_witness_timeout")]
+    pub witness_timeout_seconds: u64,
+}
+
+const fn default_poll_interval() -> u64 {
+    60
+}
+
+const fn default_witness_timeout() -> u64 {
+    5
 }
 
 impl Config {
@@ -68,6 +90,18 @@ impl Config {
         self.identity
             .clone()
             .unwrap_or_else(|| self.database.with_extension("salt"))
+    }
+
+    /// Returns how often to poll an observed identifier's witnesses.
+    #[must_use]
+    pub const fn poll_policy(&self) -> PollPolicy {
+        PollPolicy::new(Duration::from_secs(self.poll_interval_seconds))
+    }
+
+    /// Returns how long to wait for a witness's answer.
+    #[must_use]
+    pub const fn witness_timeout(&self) -> Duration {
+        Duration::from_secs(self.witness_timeout_seconds)
     }
 
     /// Returns whose key state notices to keep.

@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use keri_watcher::{Config, Watcher, WatcherError, http};
+use keri_watcher::{Config, HttpClient, Observer, Poller, Watcher, WatcherError, http};
 use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 
@@ -42,10 +42,22 @@ async fn run(path: PathBuf) -> Result<(), WatcherError> {
         .await
         .map_err(|source| WatcherError::Serve { source })?;
     info!(%prefix, listen = %config.listen, "watcher started");
-    axum::serve(listener, http::router(Arc::new(watcher)))
+    let watcher = Arc::new(watcher);
+    let policy = config.poll_policy();
+    let poller = (!policy.is_disabled())
+        .then(|| {
+            let observer = Observer::new(Arc::clone(&watcher), HttpClient::new()?, config.witness_timeout());
+            Ok::<_, WatcherError>(tokio::spawn(Poller::new(Arc::clone(&watcher), observer, policy).run()))
+        })
+        .transpose()?;
+    let served = axum::serve(listener, http::router(watcher))
         .with_graceful_shutdown(async {
             let _ = tokio::signal::ctrl_c().await;
         })
         .await
-        .map_err(|source| WatcherError::Serve { source })
+        .map_err(|source| WatcherError::Serve { source });
+    if let Some(poller) = poller {
+        poller.abort();
+    }
+    served
 }

@@ -16,17 +16,21 @@ keri-cesr = { version = "0.1.0", features = ["crypto"] }
 keri-kel = "0.1.0"
 keri-protocol = "0.2.0"
 keri-store-redb = { version = "0.1.0", path = "crates/keri-store-redb" }
+keri-watch = { version = "0.1.0", path = "crates/keri-watch" }
 redb = "4.4.0"
 
 axum = { version = "0.8.9", default-features = false, features = ["http1", "tokio"] }
 chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
+http-body-util = "0.1.5"
+hyper = { version = "1.8.1", default-features = false, features = ["client", "http1", "http2"] }
+hyper-rustls = { version = "0.27.9", default-features = false, features = ["http1", "http2", "native-tokio", "ring"] }
+hyper-util = { version = "0.1.20", default-features = false, features = ["client-legacy", "http1", "http2", "tokio"] }
 serde = { version = "1.0.228", features = ["derive"] }
-tokio = { version = "1.54.1", features = ["macros", "net", "rt-multi-thread", "signal"] }
+tokio = { version = "1.54.1", features = ["macros", "net", "rt-multi-thread", "signal", "time"] }
 toml = { version = "1.1.8", default-features = false, features = ["parse", "serde"] }
 tracing = { version = "0.1.44", default-features = false, features = ["std"] }
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 
-http-body-util = "0.1.5"
 proptest = { version = "1.11.0", default-features = false, features = ["std"] }
 tower = { version = "0.5.3", default-features = false, features = ["util"] }
 

@@ -11,6 +11,7 @@ use keri_protocol::event::EventError;
 use keri_protocol::event::timestamp::TimestampError;
 use keri_protocol::prefix::PrefixError;
 use keri_protocol::stream::StreamError;
+use keri_watch::WatchError;
 
 /// Why the watcher could not start, or could not handle what it was sent.
 #[derive(Debug)]
@@ -65,6 +66,11 @@ pub enum WatcherError {
         /// Underlying failure.
         source: Box<dyn Error + Send + Sync>,
     },
+    /// An identifier could not be planned or tracked.
+    Watch {
+        /// Underlying failure.
+        source: WatchError,
+    },
     /// The listening address could not be bound, or serving failed.
     Serve {
         /// Underlying failure.
@@ -111,6 +117,7 @@ impl fmt::Display for WatcherError {
             Self::NotAQuery => formatter.write_str("body is not a single query"),
             Self::Kel { .. } => formatter.write_str("key event log processing failed"),
             Self::Answer { .. } => formatter.write_str("answer could not be written"),
+            Self::Watch { .. } => formatter.write_str("identifier could not be planned or tracked"),
             Self::Serve { .. } => formatter.write_str("HTTP could not be served"),
             Self::Interrupted => formatter.write_str("request handling stopped before it finished"),
         }
@@ -130,6 +137,7 @@ impl Error for WatcherError {
             Self::NotAQuery | Self::Interrupted => None,
             Self::Kel { source } => Some(source.as_ref()),
             Self::Answer { source } => Some(source.as_ref()),
+            Self::Watch { source } => Some(source),
         }
     }
 }

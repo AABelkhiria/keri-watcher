@@ -1,3 +1,5 @@
 # `syn` 2 and 3 coexist: serde_derive builds with `syn` 3 while curve25519-dalek-derive still builds
 # with `syn` 2. Both are proc-macro crates, so the duplicate costs compile time only.
-allowed-duplicate-crates = ["syn"]
+# `windows-sys` 0.52 and 0.61 coexist: ring, under rustls, still pins 0.52 while tokio, mio and
+# socket2 use 0.61. Both are built only for Windows targets.
+allowed-duplicate-crates = ["syn", "windows-sys"]

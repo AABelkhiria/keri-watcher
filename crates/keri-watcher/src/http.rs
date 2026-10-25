@@ -20,7 +20,7 @@ use axum::routing::{get, post};
 use tracing::{debug, error};
 
 use crate::error::WatcherError;
-use crate::watcher::{QueryOutcome, Watcher};
+use crate::watcher::{QueryOutcome, Watcher, blocking};
 
 /// The media type of a CESR stream.
 pub const CESR: &str = "application/cesr";
@@ -59,14 +59,6 @@ async fn health(State(watcher): State<Arc<Watcher>>) -> Response {
         Ok(prefix) => prefix.into_response(),
         Err(error) => failure(&WatcherError::Prefix { source: error }),
     }
-}
-
-async fn blocking<T: Send + 'static>(
-    work: impl FnOnce() -> Result<T, WatcherError> + Send + 'static,
-) -> Result<T, WatcherError> {
-    tokio::task::spawn_blocking(work)
-        .await
-        .map_err(|_| WatcherError::Interrupted)?
 }
 
 fn failure(failed: &WatcherError) -> Response {

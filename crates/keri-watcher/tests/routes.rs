@@ -22,7 +22,7 @@ use keri_protocol::prefix::{IdentifierPrefix, PrefixDerivation};
 use keri_protocol::serialization::{Sad, SadValue};
 use keri_protocol::stream::{Message, parse_stream};
 use keri_store_redb::RedbStore;
-use keri_watcher::{Identity, Watcher, http};
+use keri_watcher::{HttpClient, Identity, Watcher, WitnessClient, http};
 use tower::ServiceExt;
 
 const STAMP: &str = "2021-01-01T00:00:00.000000+00:00";
@@ -216,5 +216,28 @@ async fn what_cannot_be_answered_is_told_apart() -> Result<(), Failure> {
 
     let (status, _) = send(&router, "POST", "/", b"not a stream".to_vec()).await?;
     assert_eq!(status, StatusCode::BAD_REQUEST);
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_http_client_reads_a_served_answer() -> Result<(), Failure> {
+    let (router, id) = watcher()?;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let address = listener.local_addr()?;
+    let server = tokio::spawn(async move { axum::serve(listener, router).await });
+
+    let client = HttpClient::new()?;
+    let health = client
+        .get(format!("http://{address}/health"))
+        .await
+        .map_err(|error| error.to_string())?;
+    assert_eq!(health.status, 200);
+    assert_eq!(String::from_utf8(health.body)?, id.qb64()?);
+    let missing = client
+        .get(format!("http://{address}/nowhere"))
+        .await
+        .map_err(|error| error.to_string())?;
+    assert_eq!(missing.status, 404);
+    server.abort();
     Ok(())
 }
