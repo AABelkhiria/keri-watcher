@@ -16,7 +16,7 @@ needs.
 |---|---|
 | `keri-store-redb` | A keri-kel store on redb: the watcher's logs, escrows and replies in one database file |
 | `keri-watch` | The watcher's decisions as pure functions over explicit inputs: when to poll each observed identifier, and which witnesses to ask first |
-| `keri-watcher` | The watcher binary: its identity and configuration, HTTP routes to ingest messages and answer queries, the poller that keeps observed identifiers up to date from their witnesses, the OOBI resolver and the escrow sweeper |
+| `keri-watcher` | The watcher binary: its identity and configuration, HTTP routes to ingest messages, answer queries and serve its OOBI, the poller that keeps observed identifiers up to date from their witnesses, the OOBI resolver and the escrow sweeper |
 
 ## Prerequisites
 

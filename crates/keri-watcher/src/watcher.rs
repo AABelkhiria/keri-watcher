@@ -17,7 +17,7 @@ use keri_protocol::event::Timestamp;
 use keri_protocol::event::key_state::KeyStateRecord;
 use keri_protocol::event::kind::EventKind;
 use keri_protocol::event::reply::ReplyMessage;
-use keri_protocol::event::reply::route::{ReplyRoute, Scheme};
+use keri_protocol::event::reply::route::{EndRole, LocationScheme, ReplyRoute, Role, RouteAction, Scheme};
 use keri_protocol::prefix::IdentifierPrefix;
 use keri_protocol::said::Said;
 use keri_protocol::stream::{Message, parse_stream};
@@ -95,9 +95,10 @@ pub enum Notice {
     Refused(KelError),
 }
 
-/// A watcher: its identity, its key event logs, and its clock.
+/// A watcher: its identity, the URLs it announces, its key event logs, and its clock.
 pub struct Watcher {
     identity: Identity,
+    locations: Vec<(Scheme, String)>,
     kevery: Mutex<Kevery<RedbStore>>,
     clock: Clock,
 }
@@ -108,23 +109,32 @@ impl Watcher {
     ///
     /// # Errors
     ///
-    /// Returns the errors of [`Identity::load_or_create`] and [`Config::trust`], and
-    /// [`WatcherError::Store`] when the database cannot be opened.
+    /// Returns the errors of [`Identity::load_or_create`], [`Config::locations`] and
+    /// [`Config::trust`], and [`WatcherError::Store`] when the database cannot be opened.
     pub fn open(config: &Config) -> Result<Self, WatcherError> {
         let identity = Identity::load_or_create(&config.identity_path())?;
+        let locations = config.locations()?;
         let store = RedbStore::create(&config.database).map_err(|source| WatcherError::Store { source })?;
         let kevery = Kevery::with_store(store).trusting(config.trust()?);
-        Ok(Self::new(identity, kevery, Box::new(system_clock)))
+        Ok(Self::new(identity, kevery, Box::new(system_clock)).announcing(locations))
     }
 
-    /// Makes a watcher of an identity, a [`Kevery`] and a clock.
+    /// Makes a watcher of an identity, a [`Kevery`] and a clock, announcing no URL.
     #[must_use]
     pub fn new(identity: Identity, kevery: Kevery<RedbStore>, clock: Clock) -> Self {
         Self {
             identity,
+            locations: Vec::new(),
             kevery: Mutex::new(kevery),
             clock,
         }
+    }
+
+    /// Announces these URLs in the watcher's OOBI, each with its scheme.
+    #[must_use]
+    pub fn announcing(mut self, locations: Vec<(Scheme, String)>) -> Self {
+        self.locations = locations;
+        self
     }
 
     /// Returns the watcher's identity.
@@ -208,15 +218,46 @@ impl Watcher {
                     state,
                 }
                 .to_reply(now)?;
-                let signed = SignedMessageBuilder::new(reply.serialized())
-                    .receipt_couples(vec![self.identity.sign(reply.raw())?])
-                    .build()?;
-                Ok(QueryOutcome::Answered(signed.into_bytes()))
+                Ok(QueryOutcome::Answered(self.signed(&reply)?))
             }
             Answer::Mailbox { .. } => Ok(QueryOutcome::Mailbox),
             // An answer kind keri-kel adds later is not served until the watcher learns it.
             _ => Ok(QueryOutcome::NotFound),
         }
+    }
+
+    /// Answers an OOBI for `identifier`, naming `endpoint` when it names one, with replies the
+    /// watcher signs now: a `/loc/scheme` reply for each URL it announces, and an `/end/role/add`
+    /// reply naming itself its own `controller`, which keripy looks for to reach it. Returns `None`
+    /// for an OOBI of any other identifier or endpoint, or when the watcher announces no URL.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WatcherError::Answer`] when a reply cannot be written, and
+    /// [`WatcherError::Key`] when the watcher's key cannot sign.
+    pub fn oobi(
+        &self,
+        identifier: &IdentifierPrefix,
+        endpoint: Option<&IdentifierPrefix>,
+    ) -> Result<Option<Vec<u8>>, WatcherError> {
+        let own = self.identity.prefix();
+        if identifier != own || endpoint.is_some_and(|endpoint| endpoint != own) || self.locations.is_empty() {
+            return Ok(None);
+        }
+        let now = self.now()?;
+        let mut stream = Vec::new();
+        for (scheme, url) in &self.locations {
+            let reply = ReplyRoute::LocationScheme(LocationScheme::new(own.clone(), *scheme, url.clone())?)
+                .to_reply(now.clone())?;
+            stream.extend(self.signed(&reply)?);
+        }
+        let role = ReplyRoute::EndRole {
+            action: RouteAction::Add,
+            end_role: EndRole::new(own.clone(), Role::Controller, own.clone()),
+        }
+        .to_reply(now)?;
+        stream.extend(self.signed(&role)?);
+        Ok(Some(stream))
     }
 
     /// Drops what has waited in the escrows longer than `timeout`, then retries the rest.
@@ -404,6 +445,14 @@ impl Watcher {
             .store()
             .duplicity(&qb64(identifier)?)
             .map_err(|source| WatcherError::Store { source })
+    }
+
+    /// A reply signed by the watcher.
+    fn signed(&self, reply: &ReplyMessage) -> Result<Vec<u8>, WatcherError> {
+        Ok(SignedMessageBuilder::new(reply.serialized())
+            .receipt_couples(vec![self.identity.sign(reply.raw())?])
+            .build()?
+            .into_bytes())
     }
 
     fn now(&self) -> Result<Timestamp, WatcherError> {

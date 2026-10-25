@@ -115,7 +115,7 @@ impl<C: WitnessClient> Observer<C> {
         let (reports, contradicting) = self.reports(identifier, &witnesses, now).await?;
         if !contradicting.is_empty() {
             let witnesses: Vec<IdentifierPrefix> = contradicting.iter().map(|(witness, _)| witness.clone()).collect();
-            warn!(?identifier, ?witnesses, "witnesses contradict the log");
+            warn!(%identifier, ?witnesses, "witnesses contradict the log");
             let watcher = Arc::clone(&self.watcher);
             blocking(move || {
                 for (witness, state) in &contradicting {
@@ -133,7 +133,7 @@ impl<C: WitnessClient> Observer<C> {
                 sequence_number,
                 conflicting,
             } => {
-                warn!(?identifier, sequence_number, ?conflicting, "witnesses report duplicity");
+                warn!(%identifier, sequence_number, ?conflicting, "witnesses report duplicity");
                 let (watcher, identifier, at, reported) = (
                     Arc::clone(&self.watcher),
                     identifier.clone(),
@@ -159,7 +159,7 @@ impl<C: WitnessClient> Observer<C> {
                 .fetch(identifier, source, &url, (*missing.start(), target), now)
                 .await?;
             if let Some(to) = reached.filter(|reached| *reached >= target) {
-                info!(?identifier, from = local, to, "log updated");
+                info!(%identifier, from = local, to, "log updated");
                 return Ok(Observation::Updated { from: local, to });
             }
         }
@@ -187,14 +187,14 @@ impl<C: WitnessClient> Observer<C> {
             .map_err(|source| WatcherError::Watch { source })?
         {
             let Some(url) = url_of(witnesses, &witness) else {
-                debug!(?witness, "no location for witness");
+                debug!(%witness, "no location for witness");
                 continue;
             };
             let Some(answer) = self.ask(&witness, key_state_url(&url, identifier)?, now).await? else {
                 continue;
             };
             if answer.status != 200 {
-                debug!(?witness, status = answer.status, "no key state");
+                debug!(%witness, status = answer.status, "no key state");
                 continue;
             }
             let notice = {
@@ -204,8 +204,8 @@ impl<C: WitnessClient> Observer<C> {
             match notice {
                 Notice::Accepted(state) => reports.push((witness, *state)),
                 Notice::Contradicting(state) => contradicting.push((witness, *state)),
-                Notice::Refused(error) => debug!(?witness, %error, "key state notice refused"),
-                Notice::Unexpected => debug!(?witness, "answer is not a key state notice"),
+                Notice::Refused(error) => debug!(%witness, %error, "key state notice refused"),
+                Notice::Unexpected => debug!(%witness, "answer is not a key state notice"),
             }
         }
         Ok((reports, contradicting))
@@ -229,7 +229,7 @@ impl<C: WitnessClient> Observer<C> {
                 break;
             };
             if answer.status != 200 {
-                debug!(?witness, status = answer.status, "no log");
+                debug!(%witness, status = answer.status, "no log");
                 break;
             }
             let ingested = {
@@ -243,7 +243,7 @@ impl<C: WitnessClient> Observer<C> {
             match ingested {
                 Ok(held) => reached = held.map(|held| held.sequence_number).max(reached),
                 Err(error @ WatcherError::Stream { .. }) => {
-                    debug!(?witness, %error, "log is not a CESR stream");
+                    debug!(%witness, %error, "log is not a CESR stream");
                     break;
                 }
                 Err(error) => return Err(error),
@@ -273,9 +273,9 @@ impl<C: WitnessClient> Observer<C> {
             }
             failed => {
                 match failed {
-                    Ok(Ok(fetched)) => debug!(?witness, status = fetched.status, "witness failed"),
-                    Ok(Err(error)) => debug!(?witness, %error, "witness unreachable"),
-                    Err(_) => debug!(?witness, "witness timed out"),
+                    Ok(Ok(fetched)) => debug!(%witness, status = fetched.status, "witness failed"),
+                    Ok(Err(error)) => debug!(%witness, %error, "witness unreachable"),
+                    Err(_) => debug!(%witness, "witness timed out"),
                 }
                 self.health
                     .failed(witness, now)

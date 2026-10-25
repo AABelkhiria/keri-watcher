@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use keri_protocol::prefix::IdentifierPrefix;
 use keri_watch::{PollPlanner, PollPolicy};
-use tracing::warn;
+use tracing::{debug, warn};
 
 use crate::error::WatcherError;
 use crate::observe::{Observation, Observer};
@@ -84,8 +84,13 @@ impl<C: WitnessClient> Poller<C> {
         let origin = Instant::now();
         loop {
             let now = origin.elapsed();
-            if let Err(error) = self.round(now).await {
-                warn!(%error, "poll round failed");
+            match self.round(now).await {
+                Ok(observations) => {
+                    for (identifier, observation) in observations {
+                        debug!(%identifier, ?observation, "observed");
+                    }
+                }
+                Err(error) => warn!(%error, "poll round failed"),
             }
             let now = origin.elapsed();
             let wait = self

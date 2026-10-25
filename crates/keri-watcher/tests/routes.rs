@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use axum::Router;
 use axum::body::Body;
-use axum::http::{Request, StatusCode, header};
+use axum::http::{HeaderValue, Request, StatusCode, header};
 use chrono::{DateTime, Utc};
 use http_body_util::BodyExt;
 use keri_cesr::crypto::digest::{Digest, DigestAlgorithm};
@@ -18,6 +18,7 @@ use keri_protocol::event::KeyEvent;
 use keri_protocol::event::inception::InceptionBuilder;
 use keri_protocol::event::interaction::InteractionBuilder;
 use keri_protocol::event::query::{QueryArguments, QueryBuilder};
+use keri_protocol::event::reply::route::{Role, Scheme};
 use keri_protocol::event::timestamp::Timestamp;
 use keri_protocol::prefix::{IdentifierPrefix, PrefixDerivation};
 use keri_protocol::serialization::{Sad, SadValue};
@@ -54,11 +55,16 @@ fn signed(event: &KeyEvent, key: &Signer) -> Result<Vec<u8>, Failure> {
 
 /// A watcher whose key is derived from seed 30, on an in-memory database, at [`STAMP`].
 fn watcher() -> Result<(Router, IdentifierPrefix), Failure> {
+    announcing(Vec::new())
+}
+
+/// The watcher of [`watcher`], announcing these URLs.
+fn announcing(locations: Vec<(Scheme, String)>) -> Result<(Router, IdentifierPrefix), Failure> {
     let identity = Identity::from_signer(signer(30, KeyTransferability::NonTransferable)?)?;
     let id = identity.prefix().clone();
     let kevery = Kevery::with_store(RedbStore::in_memory()?);
     let at: DateTime<Utc> = STAMP.parse()?;
-    let watcher = Watcher::new(identity, kevery, Box::new(move || at));
+    let watcher = Watcher::new(identity, kevery, Box::new(move || at)).announcing(locations);
     Ok((http::router(Arc::new(watcher)), id))
 }
 
@@ -241,5 +247,135 @@ async fn the_http_client_reads_a_served_answer() -> Result<(), Failure> {
         .map_err(|error| error.to_string())?;
     assert_eq!(missing.status, 404);
     server.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_watchers_oobi_tells_where_it_is_reached_and_that_it_controls_itself() -> Result<(), Failure> {
+    let urls = [
+        (Scheme::Http, "http://w.example:5631".to_owned()),
+        (Scheme::Https, "https://w.example".to_owned()),
+    ];
+    let (router, id) = announcing(urls.to_vec())?;
+    let aid = id.qb64()?;
+    for path in [
+        format!("/oobi/{aid}"),
+        format!("/oobi/{aid}/controller"),
+        format!("/oobi/{aid}/watcher/{aid}"),
+    ] {
+        let request = Request::builder().uri(path.as_str()).body(Body::empty())?;
+        let response = router.clone().oneshot(request).await?;
+        assert_eq!(response.status(), StatusCode::OK, "{path}");
+        let headers = response.headers();
+        assert_eq!(
+            headers.get(header::CONTENT_TYPE).map(HeaderValue::as_bytes),
+            Some(http::OOBI_CESR.as_bytes())
+        );
+        assert_eq!(
+            headers.get(http::OOBI_AID).map(HeaderValue::as_bytes),
+            Some(aid.as_bytes())
+        );
+        let body = response.into_body().collect().await?.to_bytes();
+
+        let (mut kevery, now) = (Kevery::new(), Timestamp::parse(STAMP)?);
+        let processed = parse_stream(&body)?
+            .iter()
+            .map(|message| kevery.process(message, &now))
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(
+            processed,
+            vec![
+                Processed::LocationAccepted,
+                Processed::LocationAccepted,
+                Processed::EndRoleAccepted
+            ]
+        );
+        assert!(
+            kevery
+                .end_role(&id, Role::Controller, &id)?
+                .is_some_and(|record| record.allowed())
+        );
+        for (scheme, url) in &urls {
+            assert_eq!(
+                kevery.location(&id, *scheme)?.map(|location| location.url().to_owned()),
+                Some(url.clone())
+            );
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn only_the_watchers_own_oobi_is_answered() -> Result<(), Failure> {
+    let (router, id) = announcing(vec![(Scheme::Http, "http://w.example:5631".to_owned())])?;
+    let aid = id.qb64()?;
+    let other = prefix(&signer(31, KeyTransferability::NonTransferable)?)?.qb64()?;
+    for path in [
+        format!("/oobi/{other}"),
+        format!("/oobi/{aid}/watcher/{other}"),
+        "/oobi/nope".to_owned(),
+    ] {
+        let (status, _) = send(&router, "GET", &path, Vec::new()).await?;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{path}");
+    }
+    let (silent, _) = watcher()?;
+    let (status, _) = send(&silent, "GET", &format!("/oobi/{aid}"), Vec::new()).await?;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    Ok(())
+}
+
+/// Splits a message into its event, the body keripy posts, and its attachments, the header it
+/// posts them in.
+fn split(message: &[u8]) -> Result<(Vec<u8>, String), Failure> {
+    let event = Message::from_bytes(message)?.event().raw().len();
+    let (body, attachments) = message
+        .split_at_checked(event)
+        .ok_or("message shorter than its event")?;
+    Ok((body.to_vec(), String::from_utf8(attachments.to_vec())?))
+}
+
+async fn post_split(router: &Router, path: &str, message: &[u8]) -> Result<(StatusCode, Vec<u8>), Failure> {
+    let (body, attachments) = split(message)?;
+    let request = Request::builder()
+        .method("POST")
+        .uri(path)
+        .header(header::CONTENT_TYPE, "application/cesr+json")
+        .header(http::CESR_ATTACHMENT, attachments)
+        .body(Body::from(body))?;
+    let response = router.clone().oneshot(request).await?;
+    let status = response.status();
+    Ok((status, response.into_body().collect().await?.to_bytes().to_vec()))
+}
+
+#[tokio::test]
+async fn messages_are_taken_as_keripy_posts_and_puts_them() -> Result<(), Failure> {
+    let controller = controller()?;
+    let mut stream = Vec::new();
+    for event in &controller.events {
+        stream.extend(signed(event, &controller.key)?);
+    }
+
+    let (put, id) = watcher()?;
+    let (status, _) = send(&put, "PUT", "/", stream).await?;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    let (posted, _) = watcher()?;
+    for event in &controller.events {
+        let (status, _) = post_split(&posted, "/", &signed(event, &controller.key)?).await?;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+    }
+
+    let now = Timestamp::parse(STAMP)?;
+    for router in [&put, &posted] {
+        let arguments = QueryArguments::new(controller.identifier.clone(), id.clone());
+        let (status, body) = post_split(router, "/query", &query("ksn", arguments, false)?).await?;
+        assert_eq!(status, StatusCode::OK);
+        let mut elsewhere = Kevery::new();
+        elsewhere.process(&Message::from_bytes(&body)?, &now)?;
+        let notice = elsewhere
+            .key_state_notice(&controller.identifier, &id)?
+            .ok_or("notice not kept")?;
+        assert_eq!(notice.state().sequence_number(), 2);
+    }
     Ok(())
 }

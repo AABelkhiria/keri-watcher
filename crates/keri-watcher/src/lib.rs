@@ -10,8 +10,9 @@
 //!
 //! | Route | |
 //! |---|---|
-//! | `POST /` | Ingests a CESR stream: events, receipts, replies and queries |
+//! | `POST /`, `PUT /` | Ingests a CESR stream: events, receipts, replies and queries |
 //! | `POST /query` | Answers one query: a log replay, or the key state signed by the watcher |
+//! | `GET /oobi/{aid}[/{role}[/{eid}]]` | Answers the watcher's own OOBI: where it can be reached, signed by it |
 //! | `GET /health` | Answers with the watcher's identifier |
 
 #![forbid(unsafe_code)]

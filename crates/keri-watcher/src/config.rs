@@ -2,6 +2,8 @@
 //!
 //! ```toml
 //! listen = "127.0.0.1:5631"
+//! # The URLs the watcher announces in its OOBI, `http` or `https`.
+//! urls = ["http://127.0.0.1:5631"]
 //! database = "/var/lib/keri-watcher/watcher.redb"
 //! # The salt the watcher's key is derived from; by default the database's path with `.salt`.
 //! identity = "/var/lib/keri-watcher/watcher.salt"
@@ -23,6 +25,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use keri_kel::NoticeTrust;
+use keri_protocol::event::reply::route::Scheme;
 use keri_protocol::prefix::IdentifierPrefix;
 use keri_watch::PollPolicy;
 use serde::Deserialize;
@@ -35,6 +38,9 @@ use crate::error::WatcherError;
 pub struct Config {
     /// The address to serve HTTP on.
     pub listen: SocketAddr,
+    /// The URLs the watcher announces in its OOBI.
+    #[serde(default)]
+    pub urls: Vec<String>,
     /// The redb database file, created on first start.
     pub database: PathBuf,
     /// The file holding the salt the watcher's key is derived from, created on first start.
@@ -118,6 +124,25 @@ impl Config {
     #[must_use]
     pub const fn escrow_timeout(&self) -> Duration {
         Duration::from_secs(self.escrow_timeout_seconds)
+    }
+
+    /// Returns the URLs the watcher announces, each with its scheme.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WatcherError::Url`] for a URL that is not `http` or `https`.
+    pub fn locations(&self) -> Result<Vec<(Scheme, String)>, WatcherError> {
+        self.urls
+            .iter()
+            .map(|url| {
+                let scheme = url
+                    .split_once("://")
+                    .and_then(|(scheme, _)| scheme.parse::<Scheme>().ok())
+                    .filter(|scheme| matches!(scheme, Scheme::Http | Scheme::Https))
+                    .ok_or_else(|| WatcherError::Url { url: url.clone() })?;
+                Ok((scheme, url.clone()))
+            })
+            .collect()
     }
 
     /// Returns whose key state notices to keep.

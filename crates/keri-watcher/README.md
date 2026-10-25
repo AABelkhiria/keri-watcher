@@ -16,6 +16,8 @@ Logs go to standard error, filtered by `RUST_LOG` (`info` by default).
 
 ```toml
 listen = "127.0.0.1:5631"
+# The URLs the watcher announces in its OOBI, `http` or `https`.
+urls = ["http://127.0.0.1:5631"]
 database = "/var/lib/keri-watcher/watcher.redb"
 # The salt the watcher's key is derived from; by default the database's path with `.salt`.
 identity = "/var/lib/keri-watcher/watcher.salt"
@@ -38,9 +40,17 @@ non-transferable key, so it stays the same as long as the salt does.
 
 | Route | Answers |
 |---|---|
-| `POST /` | Processes a CESR stream of events, receipts, replies and queries, then the escrows. `204`, whatever was made of each message; `400` when the body is not a CESR stream |
+| `POST /`, `PUT /` | Processes a CESR stream of events, receipts, replies and queries, then the escrows. `204`, whatever was made of each message; `400` when the body is not a CESR stream |
 | `POST /query` | Answers one `qry`: `logs` with the identifier's events as keripy replays them, `ksn` with a `/ksn/{watcher}` reply the watcher signed. `404` when the log does not hold what is asked for yet; `400` when the body is not a single query or it is refused; `501` for `mbx` |
+| `GET /oobi/{aid}`, `/oobi/{aid}/{role}`, `/oobi/{aid}/{role}/{eid}` | The watcher's OOBI, when `aid`, and `eid` if given, are its own: a `/loc/scheme` reply for each URL in `urls` and an `/end/role/add` reply naming itself its own `controller`, all signed by the watcher, as `application/json+cesr` with a `KERI-AID` header. `404` for any other identifier, or when `urls` is empty |
 | `GET /health` | The watcher's identifier |
+
+keripy posts one message at a time, its attachments in a `CESR-ATTACHMENT` header, and puts a
+whole stream as the body; the watcher takes both, on `/` and `/query`.
+
+With keripy, a controller resolves the watcher's OOBI and adds it with `kli watcher add`, which
+sends the controller's log and the registration with `PUT /`. keripy finds where to send them
+through the watcher's `controller` end role, which is why the OOBI carries it.
 
 ## Observing
 

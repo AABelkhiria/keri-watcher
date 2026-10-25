@@ -30,6 +30,11 @@ pub enum WatcherError {
         /// Underlying failure.
         source: Box<toml::de::Error>,
     },
+    /// A URL the watcher is to announce is not `http` or `https`.
+    Url {
+        /// The URL.
+        url: String,
+    },
     /// An identifier in the configuration or the identity is not valid.
     Prefix {
         /// Underlying failure.
@@ -115,6 +120,7 @@ impl fmt::Display for WatcherError {
         match self {
             Self::File { path, .. } => write!(formatter, "{} could not be read or written", path.display()),
             Self::Config { .. } => formatter.write_str("configuration is not valid"),
+            Self::Url { url } => write!(formatter, "{url} is not an http or https URL"),
             Self::Prefix { .. } => formatter.write_str("identifier is not valid"),
             Self::Key { .. } => formatter.write_str("identity key could not be derived or sign"),
             Self::Store { .. } => formatter.write_str("store could not be opened, or failed"),
@@ -142,7 +148,7 @@ impl Error for WatcherError {
             Self::Said { source } => Some(source),
             Self::Clock { source } => Some(source),
             Self::Stream { source } => Some(source),
-            Self::NotAQuery | Self::Interrupted => None,
+            Self::Url { .. } | Self::NotAQuery | Self::Interrupted => None,
             Self::Kel { source } => Some(source.as_ref()),
             Self::Answer { source } => Some(source.as_ref()),
             Self::Watch { source } => Some(source),

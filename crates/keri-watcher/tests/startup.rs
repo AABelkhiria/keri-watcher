@@ -11,6 +11,7 @@ use keri_kel::NoticeTrust;
 use keri_protocol::attachment::{ReceiptCouple, SignedMessageBuilder};
 use keri_protocol::event::inception::InceptionBuilder;
 use keri_protocol::event::query::{QueryArguments, QueryBuilder};
+use keri_protocol::event::reply::route::Scheme;
 use keri_protocol::event::timestamp::Timestamp;
 use keri_protocol::prefix::{IdentifierPrefix, PrefixDerivation};
 use keri_watcher::{Config, QueryOutcome, Watcher, WatcherError};
@@ -71,6 +72,26 @@ fn a_configuration_with_mistakes_is_refused() {
         Config::parse(untrusted).map(|config| config.trust()),
         Ok(Err(WatcherError::Prefix { .. }))
     ));
+    let unannounceable = "listen = \"127.0.0.1:5631\"\ndatabase = \"w.redb\"\nurls = [\"ftp://w.example\"]\n";
+    assert!(matches!(
+        Config::parse(unannounceable).map(|config| config.locations()),
+        Ok(Err(WatcherError::Url { .. }))
+    ));
+}
+
+#[test]
+fn the_urls_announced_are_http_or_https() -> Result<(), Failure> {
+    let config = Config::parse(
+        "listen = \"0.0.0.0:5631\"\ndatabase = \"w.redb\"\nurls = [\"http://w.example:5631\", \"https://w.example\"]\n",
+    )?;
+    assert_eq!(
+        config.locations()?,
+        vec![
+            (Scheme::Http, "http://w.example:5631".to_owned()),
+            (Scheme::Https, "https://w.example".to_owned()),
+        ]
+    );
+    Ok(())
 }
 
 #[test]

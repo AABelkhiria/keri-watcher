@@ -2,9 +2,14 @@
 //!
 //! | Route | Answers |
 //! |---|---|
-//! | `POST /` | `204` once the stream is processed, whatever keri-kel made of each message; `400` when the body is not a CESR stream |
+//! | `POST /`, `PUT /` | `204` once the stream is processed, whatever keri-kel made of each message; `400` when the body is not a CESR stream |
 //! | `POST /query` | `200` with the answer as `application/cesr`; `404` when the log does not hold what the query asks for yet; `400` when the body is not a single query or keri-kel refuses it; `501` for a mailbox |
+//! | `GET /oobi/{aid}`, `/oobi/{aid}/{role}`, `/oobi/{aid}/{role}/{eid}` | `200` with the watcher's `/loc/scheme` replies as `application/json+cesr`, when `aid`, and `eid` if given, are the watcher's own; `404` otherwise |
 //! | `GET /health` | `200` with the watcher's identifier |
+//!
+//! keripy posts one message at a time, its attachments in a `CESR-ATTACHMENT` header, and puts a
+//! whole stream as the body; both are taken, as is a whole stream posted. A header's attachments
+//! follow the body.
 //!
 //! Anything else that fails answers `500`, and is logged. keri-kel and redb block, so each request
 //! is handled on tokio's blocking pool.
@@ -13,10 +18,11 @@ use std::sync::Arc;
 
 use axum::Router;
 use axum::body::Bytes;
-use axum::extract::State;
-use axum::http::{StatusCode, header};
+use axum::extract::{Path, State};
+use axum::http::{HeaderMap, HeaderName, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
+use keri_protocol::prefix::IdentifierPrefix;
 use tracing::{debug, error};
 
 use crate::error::WatcherError;
@@ -25,17 +31,30 @@ use crate::watcher::{QueryOutcome, Watcher, blocking};
 /// The media type of a CESR stream.
 pub const CESR: &str = "application/cesr";
 
+/// The media type keripy serves an OOBI's CESR stream as, and requires when resolving one.
+pub const OOBI_CESR: &str = "application/json+cesr";
+
+/// The header naming the identifier an OOBI answers for, keripy's `KERI-AID`.
+pub const OOBI_AID: HeaderName = HeaderName::from_static("keri-aid");
+
+/// The header keripy puts a posted message's attachments in.
+pub const CESR_ATTACHMENT: HeaderName = HeaderName::from_static("cesr-attachment");
+
 /// Returns the router serving `watcher`.
 pub fn router(watcher: Arc<Watcher>) -> Router {
     Router::new()
-        .route("/", post(ingest))
+        .route("/", post(ingest).put(ingest))
         .route("/query", post(query))
+        .route("/oobi/{aid}", get(oobi))
+        .route("/oobi/{aid}/{role}", get(oobi_role))
+        .route("/oobi/{aid}/{role}/{eid}", get(oobi_endpoint))
         .route("/health", get(health))
         .with_state(watcher)
 }
 
-async fn ingest(State(watcher): State<Arc<Watcher>>, body: Bytes) -> Response {
-    match blocking(move || watcher.ingest(&body)).await {
+async fn ingest(State(watcher): State<Arc<Watcher>>, headers: HeaderMap, body: Bytes) -> Response {
+    let stream = with_attachments(&headers, body);
+    match blocking(move || watcher.ingest(&stream)).await {
         Ok(ingested) => {
             debug!(?ingested, "stream ingested");
             StatusCode::NO_CONTENT.into_response()
@@ -44,12 +63,43 @@ async fn ingest(State(watcher): State<Arc<Watcher>>, body: Bytes) -> Response {
     }
 }
 
-async fn query(State(watcher): State<Arc<Watcher>>, body: Bytes) -> Response {
-    match blocking(move || watcher.query(&body)).await {
+async fn query(State(watcher): State<Arc<Watcher>>, headers: HeaderMap, body: Bytes) -> Response {
+    let stream = with_attachments(&headers, body);
+    match blocking(move || watcher.query(&stream)).await {
         Ok(QueryOutcome::Answered(answer)) => ([(header::CONTENT_TYPE, CESR)], answer).into_response(),
         Ok(QueryOutcome::NotFound) => StatusCode::NOT_FOUND.into_response(),
         Ok(QueryOutcome::Mailbox) => StatusCode::NOT_IMPLEMENTED.into_response(),
         Ok(QueryOutcome::Refused(error)) => (StatusCode::BAD_REQUEST, error.to_string()).into_response(),
+        Err(error) => failure(&error),
+    }
+}
+
+async fn oobi(State(watcher): State<Arc<Watcher>>, Path(aid): Path<String>) -> Response {
+    answer_oobi(watcher, aid, None).await
+}
+
+async fn oobi_role(State(watcher): State<Arc<Watcher>>, Path((aid, _)): Path<(String, String)>) -> Response {
+    answer_oobi(watcher, aid, None).await
+}
+
+async fn oobi_endpoint(
+    State(watcher): State<Arc<Watcher>>,
+    Path((aid, _, eid)): Path<(String, String, String)>,
+) -> Response {
+    answer_oobi(watcher, aid, Some(eid)).await
+}
+
+/// Answers an OOBI for `aid`, naming endpoint `eid`, whatever role it names: the watcher plays one.
+async fn answer_oobi(watcher: Arc<Watcher>, aid: String, eid: Option<String>) -> Response {
+    let (Ok(identifier), Ok(endpoint)) = (
+        IdentifierPrefix::from_qb64(&aid),
+        eid.as_deref().map(IdentifierPrefix::from_qb64).transpose(),
+    ) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    match blocking(move || watcher.oobi(&identifier, endpoint.as_ref())).await {
+        Ok(Some(stream)) => ([(header::CONTENT_TYPE, OOBI_CESR.to_owned()), (OOBI_AID, aid)], stream).into_response(),
+        Ok(None) => StatusCode::NOT_FOUND.into_response(),
         Err(error) => failure(&error),
     }
 }
@@ -59,6 +109,15 @@ async fn health(State(watcher): State<Arc<Watcher>>) -> Response {
         Ok(prefix) => prefix.into_response(),
         Err(error) => failure(&WatcherError::Prefix { source: error }),
     }
+}
+
+/// The body, followed by the attachments a `CESR-ATTACHMENT` header carries.
+fn with_attachments(headers: &HeaderMap, body: Bytes) -> Vec<u8> {
+    let mut stream = Vec::from(body);
+    if let Some(attachments) = headers.get(CESR_ATTACHMENT) {
+        stream.extend_from_slice(attachments.as_bytes());
+    }
+    stream
 }
 
 fn failure(failed: &WatcherError) -> Response {
