@@ -24,7 +24,7 @@ use keri_protocol::prefix::{IdentifierPrefix, PrefixDerivation};
 use keri_protocol::serialization::{Sad, SadValue};
 use keri_protocol::stream::{Message, parse_stream};
 use keri_store_redb::RedbStore;
-use keri_watcher::{HttpClient, Identity, Watcher, WitnessClient, http};
+use keri_watcher::{Health, Held, HttpClient, Identity, Watcher, WitnessClient, http};
 use tower::ServiceExt;
 
 const STAMP: &str = "2021-01-01T00:00:00.000000+00:00";
@@ -140,11 +140,63 @@ async fn ingest(router: &Router, controller: &Controller) -> Result<(), Failure>
 }
 
 #[tokio::test]
-async fn health_names_the_watcher() -> Result<(), Failure> {
+async fn health_names_the_watcher_and_tells_what_it_holds() -> Result<(), Failure> {
     let (router, id) = watcher()?;
+    let controller = controller()?;
+    ingest(&router, &controller).await?;
+    let unknown = prefix(&signer(9, KeyTransferability::Transferable)?)?;
+    let waiting = query("ksn", QueryArguments::new(unknown, id.clone()), true)?;
+    let (status, _) = send(&router, "POST", "/query", waiting).await?;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
     let (status, body) = send(&router, "GET", "/health", Vec::new()).await?;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(String::from_utf8(body)?, id.qb64()?);
+    let health: Health = serde_json::from_slice(&body)?;
+    assert_eq!(health.identifier, id.qb64()?);
+    assert_eq!(
+        health.held,
+        Held {
+            observed: 0,
+            escrowed_events: 0,
+            waiting_receipts: 0,
+            escrowed_queries: 1,
+        }
+    );
+    assert_eq!(health.witnesses, Vec::new());
+    Ok(())
+}
+
+#[tokio::test]
+async fn metrics_count_the_messages_taken() -> Result<(), Failure> {
+    let (router, _) = watcher()?;
+    let controller = controller()?;
+    ingest(&router, &controller).await?;
+    let unknown = prefix(&signer(9, KeyTransferability::Transferable)?)?;
+    let unanswerable = query("ksn", QueryArguments::new(unknown.clone(), unknown), false)?;
+    let (status, _) = send(&router, "POST", "/", unanswerable).await?;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    let request = Request::builder().uri("/metrics").body(Body::empty())?;
+    let response = router.clone().oneshot(request).await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers().get(header::CONTENT_TYPE).map(HeaderValue::as_bytes),
+        Some(http::PROMETHEUS.as_bytes())
+    );
+    let text = String::from_utf8(response.into_body().collect().await?.to_bytes().to_vec())?;
+    for line in [
+        "# TYPE keri_watcher_messages_total counter",
+        "keri_watcher_messages_total{outcome=\"processed\"} 3",
+        "keri_watcher_messages_total{outcome=\"refused\"} 1",
+        "# TYPE keri_watcher_observed gauge",
+        "keri_watcher_observed 0",
+        "keri_watcher_escrowed_events 0",
+    ] {
+        assert!(
+            text.lines().any(|written| written == line),
+            "{line} missing from\n{text}"
+        );
+    }
     Ok(())
 }
 
@@ -240,7 +292,8 @@ async fn the_http_client_reads_a_served_answer() -> Result<(), Failure> {
         .await
         .map_err(|error| error.to_string())?;
     assert_eq!(health.status, 200);
-    assert_eq!(String::from_utf8(health.body)?, id.qb64()?);
+    let health: Health = serde_json::from_slice(&health.body)?;
+    assert_eq!(health.identifier, id.qb64()?);
     let missing = client
         .get(format!("http://{address}/nowhere"))
         .await

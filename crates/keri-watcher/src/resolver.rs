@@ -22,6 +22,7 @@ use std::time::{Duration, Instant};
 use tracing::{info, warn};
 
 use crate::error::WatcherError;
+use crate::status::Counter;
 use crate::watcher::{Ingested, Watcher, blocking};
 use crate::witness::WitnessClient;
 
@@ -47,6 +48,18 @@ pub enum Resolution {
     /// It is not an `http` or `https` URL, its server refused it, it serves no CESR stream, or it
     /// was asked for again too many times.
     Failed,
+}
+
+impl Resolution {
+    /// Returns what became of the OOBI, as a metric label.
+    #[must_use]
+    pub const fn label(&self) -> &'static str {
+        match self {
+            Self::Resolved(_) => "resolved",
+            Self::Retrying { .. } => "retrying",
+            Self::Failed => "failed",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -101,6 +114,7 @@ impl<C: WitnessClient> Resolver<C> {
                 None => 0,
             };
             let resolution = self.resolve(&url, retries).await?;
+            self.watcher.status().count(Counter::Oobi(resolution.label()), 1);
             if let Resolution::Retrying { retries } = resolution {
                 self.waiting.insert(
                     url.clone(),

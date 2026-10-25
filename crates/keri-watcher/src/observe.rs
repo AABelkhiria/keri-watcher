@@ -66,6 +66,22 @@ pub enum Observation {
     },
 }
 
+impl Observation {
+    /// Returns what was found, as a metric label.
+    #[must_use]
+    pub const fn label(&self) -> &'static str {
+        match self {
+            Self::Unknown => "unknown",
+            Self::Silent => "silent",
+            Self::UpToDate { .. } => "up_to_date",
+            Self::Updated { .. } => "updated",
+            Self::Behind { .. } => "behind",
+            Self::Duplicitous { .. } => "duplicitous",
+            Self::Contradicted { .. } => "contradicted",
+        }
+    }
+}
+
 /// Observes identifiers through their witnesses, keeping track of each witness's health.
 #[derive(Debug)]
 pub struct Observer<C> {

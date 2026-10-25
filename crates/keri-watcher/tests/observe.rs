@@ -8,7 +8,11 @@ use std::future::Future;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
+use axum::body::Body;
+use axum::http::{Request, StatusCode};
 use chrono::{DateTime, TimeDelta, Utc};
+use http_body_util::BodyExt;
+use tower::ServiceExt;
 
 use keri_cesr::crypto::digest::{Digest, DigestAlgorithm};
 use keri_cesr::crypto::signer::{SignaturePlacement, Signer};
@@ -29,8 +33,8 @@ use keri_store_redb::RedbStore;
 use keri_watch::PollPolicy;
 use keri_watcher::witness::{ClientError, key_state_url, log_url};
 use keri_watcher::{
-    Fetched, Identity, Ingested, Observation, Observer, Poller, Resolution, Resolver, Sighting, Swept, Watcher,
-    WitnessClient,
+    Fetched, Health, Identity, Ingested, Observation, Observer, Poller, Resolution, Resolver, Sighting, Swept, Watcher,
+    WitnessClient, http,
 };
 
 const STAMP: &str = "2021-01-01T00:00:00.000000+00:00";
@@ -392,7 +396,24 @@ async fn witnesses_reporting_different_events_are_duplicitous() -> Result<(), Fa
     ])?;
     assert_eq!(watcher.duplicity(&world.identifier)?, vec![(1, recorded.clone())]);
     observer.observe(&world.identifier, Duration::from_secs(60)).await?;
-    assert_eq!(watcher.duplicity(&world.identifier)?, vec![(1, recorded)]);
+    assert_eq!(watcher.duplicity(&world.identifier)?, vec![(1, recorded.clone())]);
+
+    let served: serde_json::Value =
+        serde_json::from_slice(&get(&watcher, &format!("/duplicity/{}", world.identifier.qb64()?)).await?)?;
+    let reported: Vec<serde_json::Value> = recorded
+        .iter()
+        .map(|sighting| {
+            serde_json::json!({
+                "said": sighting.said,
+                "source": sighting.source,
+                "first_seen": STAMP,
+            })
+        })
+        .collect();
+    assert_eq!(
+        served,
+        serde_json::json!([{ "sequence_number": 1, "reported": reported }])
+    );
     Ok(())
 }
 
@@ -447,7 +468,40 @@ async fn the_poller_observes_what_registrations_ask_for_when_due() -> Result<(),
         poller.round(Duration::from_secs(61)).await?,
         vec![(world.identifier.clone(), Observation::UpToDate { sequence_number: 2 })]
     );
+
+    let health: Health = serde_json::from_slice(&get(&watcher, "/health").await?)?;
+    assert_eq!(health.held.observed, 1);
+    let mut asked: Vec<(String, u64)> = health
+        .witnesses
+        .iter()
+        .map(|report| (report.witness.clone(), report.successes))
+        .collect();
+    asked.sort();
+    let mut expected = vec![(world.witness(0)?.1.qb64()?, 3), (world.witness(1)?.1.qb64()?, 2)];
+    expected.sort();
+    assert_eq!(asked, expected);
+    let metrics = String::from_utf8(get(&watcher, "/metrics").await?)?;
+    for line in [
+        "keri_watcher_observations_total{found=\"updated\"} 1",
+        "keri_watcher_observations_total{found=\"up_to_date\"} 1",
+        "keri_watcher_observed 1",
+    ] {
+        assert!(
+            metrics.lines().any(|written| written == line),
+            "{line} missing from\n{metrics}"
+        );
+    }
     Ok(())
+}
+
+/// What the watcher's router answers to `GET path`, which must be `200`.
+async fn get(watcher: &Arc<Watcher>, path: &str) -> Result<Vec<u8>, Failure> {
+    let request = Request::builder().uri(path).body(Body::empty())?;
+    let response = http::router(Arc::clone(watcher)).oneshot(request).await?;
+    if response.status() != StatusCode::OK {
+        return Err(format!("{path} answered {}", response.status()).into());
+    }
+    Ok(response.into_body().collect().await?.to_bytes().to_vec())
 }
 
 const OOBI: &str = "http://w0.example:5642/oobi/controller/witness";

@@ -812,6 +812,7 @@ dependencies = [
  "keri-store-redb",
  "keri-watch",
  "serde",
+ "serde_json",
  "tokio",
  "toml",
  "tower",

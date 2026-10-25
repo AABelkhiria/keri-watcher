@@ -27,6 +27,7 @@ use tracing::{debug, info};
 use crate::config::Config;
 use crate::error::WatcherError;
 use crate::identity::Identity;
+use crate::status::{Counter, Health, Held, Status};
 
 /// Where the watcher reads the time from.
 pub type Clock = Box<dyn Fn() -> DateTime<Utc> + Send + Sync>;
@@ -101,6 +102,7 @@ pub struct Watcher {
     locations: Vec<(Scheme, String)>,
     kevery: Mutex<Kevery<RedbStore>>,
     clock: Clock,
+    status: Status,
 }
 
 impl Watcher {
@@ -127,6 +129,7 @@ impl Watcher {
             locations: Vec::new(),
             kevery: Mutex::new(kevery),
             clock,
+            status: Status::new(),
         }
     }
 
@@ -169,6 +172,8 @@ impl Watcher {
         }
         ingested.unescrowed = kevery.process_escrows(&now).map_err(WatcherError::kel)?;
         drop_answers(&mut kevery);
+        self.status.count(Counter::Processed, count(ingested.processed));
+        self.status.count(Counter::Refused, count(ingested.refused));
         Ok(ingested)
     }
 
@@ -278,6 +283,7 @@ impl Watcher {
         };
         let unescrowed = kevery.process_escrows(&now).map_err(WatcherError::kel)?;
         drop_answers(&mut kevery);
+        self.status.count(Counter::Expired, count(expired));
         Ok(Swept { expired, unescrowed })
     }
 
@@ -455,6 +461,48 @@ impl Watcher {
             .into_bytes())
     }
 
+    /// Returns what the watcher holds: the identifiers it observes, and what waits in its
+    /// escrows.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WatcherError::Kel`] when the store fails.
+    pub fn held(&self) -> Result<Held, WatcherError> {
+        let observed = self.observed()?.len();
+        let kevery = self.kevery();
+        Ok(Held {
+            observed,
+            escrowed_events: kevery.escrowed_event_count().map_err(WatcherError::kel)?,
+            waiting_receipts: kevery.waiting_receipt_count().map_err(WatcherError::kel)?,
+            escrowed_queries: kevery.escrowed_query_count().map_err(WatcherError::kel)?,
+        })
+    }
+
+    /// Returns the watcher's health: its identifier, what it holds, and how its witnesses have
+    /// answered.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`Watcher::held`], and [`WatcherError::Prefix`] when the identifier
+    /// cannot be written as qb64.
+    pub fn health(&self) -> Result<Health, WatcherError> {
+        Ok(self.status.health(qb64(self.identity.prefix())?, self.held()?))
+    }
+
+    /// Returns the watcher's counters, what it holds and its witnesses' health, as Prometheus
+    /// text.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`Watcher::held`].
+    pub fn metrics(&self) -> Result<String, WatcherError> {
+        Ok(self.status.metrics(self.held()?))
+    }
+
+    pub(crate) const fn status(&self) -> &Status {
+        &self.status
+    }
+
     fn now(&self) -> Result<Timestamp, WatcherError> {
         timestamp((self.clock)())
     }
@@ -473,6 +521,11 @@ pub(crate) async fn blocking<T: Send + 'static>(
     tokio::task::spawn_blocking(work)
         .await
         .map_err(|_| WatcherError::Interrupted)?
+}
+
+/// A count as a counter's increment.
+pub(crate) fn count(count: usize) -> u64 {
+    u64::try_from(count).unwrap_or(u64::MAX)
 }
 
 fn qb64(identifier: &IdentifierPrefix) -> Result<String, WatcherError> {

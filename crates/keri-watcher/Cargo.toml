@@ -24,6 +24,7 @@ keri-protocol.workspace = true
 keri-watch.workspace = true
 keri-store-redb.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 tokio.workspace = true
 toml.workspace = true
 tracing.workspace = true

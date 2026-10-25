@@ -5,7 +5,9 @@
 //! | `POST /`, `PUT /` | `204` once the stream is processed, whatever keri-kel made of each message; `400` when the body is not a CESR stream |
 //! | `POST /query` | `200` with the answer as `application/cesr`; `404` when the log does not hold what the query asks for yet; `400` when the body is not a single query or keri-kel refuses it; `501` for a mailbox |
 //! | `GET /oobi/{aid}`, `/oobi/{aid}/{role}`, `/oobi/{aid}/{role}/{eid}` | `200` with the watcher's `/loc/scheme` replies as `application/json+cesr`, when `aid`, and `eid` if given, are the watcher's own; `404` otherwise |
-//! | `GET /health` | `200` with the watcher's identifier |
+//! | `GET /health` | `200` with the watcher's identifier, what it holds and its witnesses' health, as JSON |
+//! | `GET /metrics` | `200` with the watcher's counters and gauges as Prometheus text |
+//! | `GET /duplicity/{aid}` | `200` with the duplicity recorded for `aid`, as JSON, empty when there is none; `404` when `aid` is not an identifier |
 //!
 //! keripy posts one message at a time, its attachments in a `CESR-ATTACHMENT` header, and puts a
 //! whole stream as the body; both are taken, as is a whole stream posted. A header's attachments
@@ -23,6 +25,7 @@ use axum::http::{HeaderMap, HeaderName, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use keri_protocol::prefix::IdentifierPrefix;
+use serde::Serialize;
 use tracing::{debug, error};
 
 use crate::error::WatcherError;
@@ -37,6 +40,9 @@ pub const OOBI_CESR: &str = "application/json+cesr";
 /// The header naming the identifier an OOBI answers for, keripy's `KERI-AID`.
 pub const OOBI_AID: HeaderName = HeaderName::from_static("keri-aid");
 
+/// The media type of Prometheus text.
+pub const PROMETHEUS: &str = "text/plain; version=0.0.4";
+
 /// The header keripy puts a posted message's attachments in.
 pub const CESR_ATTACHMENT: HeaderName = HeaderName::from_static("cesr-attachment");
 
@@ -49,6 +55,8 @@ pub fn router(watcher: Arc<Watcher>) -> Router {
         .route("/oobi/{aid}/{role}", get(oobi_role))
         .route("/oobi/{aid}/{role}/{eid}", get(oobi_endpoint))
         .route("/health", get(health))
+        .route("/metrics", get(metrics))
+        .route("/duplicity/{aid}", get(duplicity))
         .with_state(watcher)
 }
 
@@ -105,9 +113,64 @@ async fn answer_oobi(watcher: Arc<Watcher>, aid: String, eid: Option<String>) ->
 }
 
 async fn health(State(watcher): State<Arc<Watcher>>) -> Response {
-    match watcher.identity().prefix().qb64() {
-        Ok(prefix) => prefix.into_response(),
-        Err(error) => failure(&WatcherError::Prefix { source: error }),
+    match blocking(move || watcher.health()).await {
+        Ok(health) => json(&health),
+        Err(error) => failure(&error),
+    }
+}
+
+async fn metrics(State(watcher): State<Arc<Watcher>>) -> Response {
+    match blocking(move || watcher.metrics()).await {
+        Ok(text) => ([(header::CONTENT_TYPE, PROMETHEUS)], text).into_response(),
+        Err(error) => failure(&error),
+    }
+}
+
+/// One sequence number duplicity was seen at, as `GET /duplicity/{aid}` answers it.
+#[derive(Serialize)]
+struct Duplicity {
+    sequence_number: u128,
+    reported: Vec<Reported>,
+}
+
+/// One source's event, as `GET /duplicity/{aid}` answers it.
+#[derive(Serialize)]
+struct Reported {
+    said: String,
+    source: String,
+    first_seen: String,
+}
+
+async fn duplicity(State(watcher): State<Arc<Watcher>>, Path(aid): Path<String>) -> Response {
+    let Ok(identifier) = IdentifierPrefix::from_qb64(&aid) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    match blocking(move || watcher.duplicity(&identifier)).await {
+        Ok(recorded) => {
+            let answer: Vec<Duplicity> = recorded
+                .into_iter()
+                .map(|(sequence_number, sightings)| Duplicity {
+                    sequence_number,
+                    reported: sightings
+                        .into_iter()
+                        .map(|sighting| Reported {
+                            said: sighting.said,
+                            source: sighting.source,
+                            first_seen: sighting.first_seen.into_string(),
+                        })
+                        .collect(),
+                })
+                .collect();
+            json(&answer)
+        }
+        Err(error) => failure(&error),
+    }
+}
+
+fn json(value: &impl Serialize) -> Response {
+    match serde_json::to_vec(value) {
+        Ok(body) => ([(header::CONTENT_TYPE, "application/json")], body).into_response(),
+        Err(error) => failure(&WatcherError::answer(error)),
     }
 }
 

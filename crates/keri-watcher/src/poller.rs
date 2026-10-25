@@ -13,6 +13,7 @@ use tracing::{debug, warn};
 
 use crate::error::WatcherError;
 use crate::observe::{Observation, Observer};
+use crate::status::Counter;
 use crate::watcher::{Watcher, blocking};
 use crate::witness::WitnessClient;
 
@@ -74,8 +75,12 @@ impl<C: WitnessClient> Poller<C> {
             let observation = self.observer.observe(&identifier, now).await?;
             let changed = matches!(observation, Observation::Updated { .. });
             self.planner.polled(&identifier, now, changed).map_err(watch)?;
+            self.watcher.status().count(Counter::Observed(observation.label()), 1);
             observations.push((identifier, observation));
         }
+        self.watcher
+            .status()
+            .set_witnesses(self.observer.health().records().cloned().collect());
         Ok(observations)
     }
 
