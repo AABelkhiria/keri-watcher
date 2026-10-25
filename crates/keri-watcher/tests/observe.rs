@@ -1,11 +1,14 @@
-//! Observing identifiers through scripted witnesses: what each witness answers is set by the test,
-//! and the watcher, on an in-memory database with a fixed clock, decides what to fetch and keep.
+//! Observing identifiers through scripted witnesses: what each witness, and each OOBI, answers is
+//! set by the test, and the watcher, on an in-memory database with a clock the test sets, decides
+//! what to fetch and keep.
 
 use std::collections::HashMap;
 use std::error::Error;
 use std::future::Future;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
+
+use chrono::{DateTime, TimeDelta, Utc};
 
 use keri_cesr::crypto::digest::{Digest, DigestAlgorithm};
 use keri_cesr::crypto::signer::{SignaturePlacement, Signer};
@@ -25,7 +28,9 @@ use keri_protocol::stream::Message;
 use keri_store_redb::RedbStore;
 use keri_watch::PollPolicy;
 use keri_watcher::witness::{ClientError, key_state_url, log_url};
-use keri_watcher::{Fetched, Identity, Observation, Observer, Poller, Watcher, WitnessClient};
+use keri_watcher::{
+    Fetched, Identity, Ingested, Observation, Observer, Poller, Resolution, Resolver, Swept, Watcher, WitnessClient,
+};
 
 const STAMP: &str = "2021-01-01T00:00:00.000000+00:00";
 const TIMEOUT: Duration = Duration::from_secs(5);
@@ -174,12 +179,16 @@ impl World {
         self.by_witness(index, &reply)
     }
 
-    /// The controller's registration asking `watcher` to observe it.
-    fn registration(&self, watcher: &IdentifierPrefix) -> Result<Vec<u8>, Failure> {
+    /// The controller's registration asking `watcher` to observe it, with an OOBI for it.
+    fn registration(&self, watcher: &IdentifierPrefix, oobi: Option<&str>) -> Result<Vec<u8>, Failure> {
+        let mut observation = WatcherObservation::new(self.identifier.clone(), self.identifier.clone());
+        if let Some(oobi) = oobi {
+            observation = observation.oobi(oobi);
+        }
         let reply = ReplyRoute::WatcherObservation {
             watcher: watcher.clone(),
             action: RouteAction::Add,
-            observation: WatcherObservation::new(self.identifier.clone(), self.identifier.clone()),
+            observation,
         }
         .to_reply(Timestamp::parse(STAMP)?)?;
         let inception = self.events.first().ok_or("no inception")?;
@@ -218,17 +227,42 @@ impl World {
     }
 }
 
-/// A watcher holding the controller's events up to `held` and the witnesses' locations.
-fn watcher(world: &World, held: &[&KeyEvent]) -> Result<Arc<Watcher>, Failure> {
+/// A clock the test sets, starting at [`STAMP`].
+#[derive(Clone)]
+struct Time(Arc<Mutex<DateTime<Utc>>>);
+
+impl Time {
+    fn new() -> Result<Self, Failure> {
+        Ok(Self(Arc::new(Mutex::new(STAMP.parse()?))))
+    }
+
+    fn advance(&self, by: TimeDelta) {
+        let mut at = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        *at += by;
+    }
+
+    fn now(&self) -> DateTime<Utc> {
+        *self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+/// A watcher on an in-memory database, reading `time`.
+fn empty_watcher(time: &Time) -> Result<Arc<Watcher>, Failure> {
     let identity = Identity::from_signer(signer(30, KeyTransferability::NonTransferable)?)?;
     let kevery = Kevery::with_store(RedbStore::in_memory()?);
-    let watcher = Watcher::new(identity, kevery, Box::new(|| Timestamp::parse(STAMP)));
+    let time = time.clone();
+    Ok(Arc::new(Watcher::new(identity, kevery, Box::new(move || time.now()))))
+}
+
+/// A watcher holding the controller's events up to `held` and the witnesses' locations.
+fn watcher(world: &World, held: &[&KeyEvent]) -> Result<Arc<Watcher>, Failure> {
+    let watcher = empty_watcher(&Time::new()?)?;
     let mut stream = world.locations()?;
     for event in held {
         stream.extend(world.signed(event)?);
     }
     watcher.ingest(&stream)?;
-    Ok(Arc::new(watcher))
+    Ok(watcher)
 }
 
 fn latest(watcher: &Watcher, identifier: &IdentifierPrefix) -> Result<Option<u128>, Failure> {
@@ -370,7 +404,7 @@ async fn the_poller_observes_what_registrations_ask_for_when_due() -> Result<(),
     let mut poller = Poller::new(Arc::clone(&watcher), observer, PollPolicy::new(Duration::from_secs(60)));
 
     assert_eq!(poller.round(Duration::ZERO).await?, Vec::new());
-    watcher.ingest(&world.registration(watcher.identity().prefix())?)?;
+    watcher.ingest(&world.registration(watcher.identity().prefix(), None)?)?;
     assert_eq!(
         poller.round(Duration::from_secs(1)).await?,
         vec![(world.identifier.clone(), Observation::Updated { from: 0, to: 2 })]
@@ -380,5 +414,144 @@ async fn the_poller_observes_what_registrations_ask_for_when_due() -> Result<(),
         poller.round(Duration::from_secs(61)).await?,
         vec![(world.identifier.clone(), Observation::UpToDate { sequence_number: 2 })]
     );
+    Ok(())
+}
+
+const OOBI: &str = "http://w0.example:5642/oobi/controller/witness";
+
+/// Resolves, in one round, a registration's OOBI that answers `status` with `body`, or does not
+/// answer.
+async fn resolve_once(oobi: &str, answer: Option<(u16, Vec<u8>)>) -> Result<Vec<(String, Resolution)>, Failure> {
+    let world = world()?;
+    let watcher = empty_watcher(&Time::new()?)?;
+    watcher.ingest(&world.signed(world.event(0)?)?)?;
+    watcher.ingest(&world.registration(watcher.identity().prefix(), Some(oobi))?)?;
+    let script = Script::default();
+    if let Some((status, body)) = answer {
+        script.answer(oobi.to_owned(), status, body);
+    }
+    let mut resolver = Resolver::new(watcher, script, TIMEOUT);
+    Ok(resolver.round(Duration::ZERO).await?)
+}
+
+#[tokio::test]
+async fn an_oobi_resolved_brings_the_log_and_the_witnesses_locations() -> Result<(), Failure> {
+    let world = world()?;
+    let all: Vec<&KeyEvent> = world.events.iter().collect();
+    let watcher = empty_watcher(&Time::new()?)?;
+    watcher.ingest(&world.signed(world.event(0)?)?)?;
+    watcher.ingest(&world.registration(watcher.identity().prefix(), Some(OOBI))?)?;
+    let script = Script::default();
+    let mut served = world.signed(world.event(0)?)?;
+    served.extend(world.locations()?);
+    script.answer(OOBI.to_owned(), 200, served);
+    world.serve(&script, 0, &all)?;
+    world.serve(&script, 1, &all)?;
+    let mut resolver = Resolver::new(Arc::clone(&watcher), script.clone(), TIMEOUT);
+    let observer = Observer::new(Arc::clone(&watcher), script, TIMEOUT);
+    let mut poller = Poller::new(Arc::clone(&watcher), observer, PollPolicy::new(Duration::from_secs(60)));
+
+    assert_eq!(
+        poller.round(Duration::ZERO).await?,
+        vec![(world.identifier.clone(), Observation::Silent)]
+    );
+    assert_eq!(
+        resolver.round(Duration::ZERO).await?,
+        vec![(
+            OOBI.to_owned(),
+            Resolution::Resolved(Ingested {
+                processed: 3,
+                refused: 0,
+                unescrowed: 0
+            })
+        )]
+    );
+    assert_eq!(resolver.round(Duration::from_secs(60)).await?, Vec::new());
+    assert_eq!(
+        poller.round(Duration::from_secs(61)).await?,
+        vec![(world.identifier.clone(), Observation::Updated { from: 0, to: 2 })]
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_oobi_not_found_is_asked_again_then_fails() -> Result<(), Failure> {
+    let world = world()?;
+    let watcher = empty_watcher(&Time::new()?)?;
+    watcher.ingest(&world.signed(world.event(0)?)?)?;
+    watcher.ingest(&world.registration(watcher.identity().prefix(), Some(OOBI))?)?;
+    let script = Script::default();
+    script.answer(OOBI.to_owned(), 404, Vec::new());
+    let mut resolver = Resolver::new(watcher, script, TIMEOUT);
+
+    let outcome = |resolution| vec![(OOBI.to_owned(), resolution)];
+    assert_eq!(
+        resolver.round(Duration::ZERO).await?,
+        outcome(Resolution::Retrying { retries: 1 })
+    );
+    assert_eq!(resolver.round(Duration::from_secs(29)).await?, Vec::new());
+    assert_eq!(
+        resolver.round(Duration::from_secs(30)).await?,
+        outcome(Resolution::Retrying { retries: 2 })
+    );
+    assert_eq!(
+        resolver.round(Duration::from_secs(60)).await?,
+        outcome(Resolution::Retrying { retries: 3 })
+    );
+    assert_eq!(
+        resolver.round(Duration::from_secs(90)).await?,
+        outcome(Resolution::Failed)
+    );
+    assert_eq!(resolver.round(Duration::from_secs(600)).await?, Vec::new());
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_unreachable_oobi_is_asked_again() -> Result<(), Failure> {
+    assert_eq!(
+        resolve_once(OOBI, None).await?,
+        vec![(OOBI.to_owned(), Resolution::Retrying { retries: 1 })]
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_oobi_refused_serving_no_stream_or_not_over_http_fails() -> Result<(), Failure> {
+    for (oobi, status, body) in [
+        (OOBI, 500, Vec::new()),
+        (OOBI, 200, b"not a stream".to_vec()),
+        ("ftp://w0.example/oobi", 200, Vec::new()),
+    ] {
+        assert_eq!(
+            resolve_once(oobi, Some((status, body))).await?,
+            vec![(oobi.to_owned(), Resolution::Failed)]
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn escrows_that_wait_too_long_are_dropped() -> Result<(), Failure> {
+    let world = world()?;
+    let time = Time::new()?;
+    let watcher = empty_watcher(&time)?;
+    let mut stream = world.locations()?;
+    stream.extend(world.signed(world.event(0)?)?);
+    stream.extend(world.signed(world.event(2)?)?);
+    watcher.ingest(&stream)?;
+    let hour = Duration::from_secs(3600);
+
+    time.advance(TimeDelta::minutes(59));
+    assert_eq!(watcher.sweep(hour)?, Swept::default());
+    time.advance(TimeDelta::minutes(2));
+    assert_eq!(
+        watcher.sweep(hour)?,
+        Swept {
+            expired: 1,
+            unescrowed: 0
+        }
+    );
+    watcher.ingest(&world.signed(world.event(1)?)?)?;
+    assert_eq!(latest(&watcher, &world.identifier)?, Some(1));
     Ok(())
 }

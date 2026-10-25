@@ -2,18 +2,22 @@
 //! on the redb store, and queries are answered from what it holds.
 //!
 //! A message keri-kel refuses is logged and skipped; the rest of the stream is still processed.
-//! Escrows are processed after each stream. A query answered only once its escrow is processed
-//! has no one to send the answer to yet, so the answer is logged and dropped.
+//! Escrows are processed after each stream, and swept by [`Watcher::sweep`]. A query answered only
+//! once its escrow is processed has no one to send the answer to yet, so the answer is logged and
+//! dropped.
 
 use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::time::Duration;
+
+use chrono::{DateTime, TimeDelta, Utc};
 
 use keri_kel::{Answer, KelError, Kevery, Processed};
 use keri_protocol::attachment::SignedMessageBuilder;
+use keri_protocol::event::Timestamp;
 use keri_protocol::event::key_state::KeyStateRecord;
 use keri_protocol::event::kind::EventKind;
 use keri_protocol::event::reply::ReplyMessage;
 use keri_protocol::event::reply::route::{ReplyRoute, Scheme};
-use keri_protocol::event::{Timestamp, TimestampError};
 use keri_protocol::prefix::IdentifierPrefix;
 use keri_protocol::stream::{Message, parse_stream};
 use keri_store_redb::RedbStore;
@@ -24,15 +28,12 @@ use crate::error::WatcherError;
 use crate::identity::Identity;
 
 /// Where the watcher reads the time from.
-pub type Clock = Box<dyn Fn() -> Result<Timestamp, TimestampError> + Send + Sync>;
+pub type Clock = Box<dyn Fn() -> DateTime<Utc> + Send + Sync>;
 
 /// Reads the system clock.
-///
-/// # Errors
-///
-/// Returns [`TimestampError`] if the formatted time is not a valid timestamp.
-pub fn system_clock() -> Result<Timestamp, TimestampError> {
-    Timestamp::parse(&chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.6f+00:00").to_string())
+#[must_use]
+pub fn system_clock() -> DateTime<Utc> {
+    Utc::now()
 }
 
 /// What became of the messages in a stream.
@@ -43,6 +44,15 @@ pub struct Ingested {
     /// Messages keri-kel refused.
     pub refused: usize,
     /// Escrowed messages processed after the stream.
+    pub unescrowed: usize,
+}
+
+/// What a sweep of the escrows did.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct Swept {
+    /// Escrowed events, receipts, replies and queries dropped for having waited too long.
+    pub expired: usize,
+    /// Escrowed events accepted.
     pub unescrowed: usize,
 }
 
@@ -206,6 +216,36 @@ impl Watcher {
         }
     }
 
+    /// Drops what has waited in the escrows longer than `timeout`, then retries the rest.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WatcherError::Kel`] when the store fails.
+    pub fn sweep(&self, timeout: Duration) -> Result<Swept, WatcherError> {
+        let at = (self.clock)();
+        let now = timestamp(at)?;
+        let cutoff = TimeDelta::from_std(timeout)
+            .ok()
+            .and_then(|timeout| at.checked_sub_signed(timeout));
+        let mut kevery = self.kevery();
+        let expired = match cutoff {
+            Some(cutoff) => kevery.expire_escrows(&timestamp(cutoff)?).map_err(WatcherError::kel)?,
+            None => 0,
+        };
+        let unescrowed = kevery.process_escrows(&now).map_err(WatcherError::kel)?;
+        drop_answers(&mut kevery);
+        Ok(Swept { expired, unescrowed })
+    }
+
+    /// Returns the OOBIs registrations queued for resolution.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WatcherError::Kel`] when the store fails.
+    pub fn oobis(&self) -> Result<Vec<String>, WatcherError> {
+        self.kevery().oobis().map_err(WatcherError::kel)
+    }
+
     /// Returns the identifiers the watcher is asked to observe: those a registration added and no
     /// later one cut.
     ///
@@ -291,7 +331,7 @@ impl Watcher {
     }
 
     fn now(&self) -> Result<Timestamp, WatcherError> {
-        (self.clock)().map_err(|source| WatcherError::Clock { source })
+        timestamp((self.clock)())
     }
 
     fn kevery(&self) -> MutexGuard<'_, Kevery<RedbStore>> {
@@ -308,6 +348,11 @@ pub(crate) async fn blocking<T: Send + 'static>(
     tokio::task::spawn_blocking(work)
         .await
         .map_err(|_| WatcherError::Interrupted)?
+}
+
+fn timestamp(at: DateTime<Utc>) -> Result<Timestamp, WatcherError> {
+    Timestamp::parse(&at.format("%Y-%m-%dT%H:%M:%S%.6f+00:00").to_string())
+        .map_err(|source| WatcherError::Clock { source })
 }
 
 fn single_query(stream: &[u8]) -> Result<Message, WatcherError> {

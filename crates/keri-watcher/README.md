@@ -24,8 +24,10 @@ identity = "/var/lib/keri-watcher/watcher.salt"
 trusted_watchers = ["BBilc4-L3tFUnfM_wJr4S4OJanAv_VmF_dJNN6vkf2Ha"]
 # How often to poll an observed identifier's witnesses while its log changes; 0 disables polling.
 poll_interval_seconds = 60
-# How long to wait for a witness's answer.
+# How long to wait for a witness's answer, or an OOBI's.
 witness_timeout_seconds = 5
+# How long an escrowed event, receipt, reply or query waits before it is dropped.
+escrow_timeout_seconds = 3600
 ```
 
 The database and the salt file are created on first start. The salt file is readable only by its
@@ -55,8 +57,26 @@ reporting different events at the same sequence number, or an event other than t
 holds, are logged as duplicity and nothing is fetched.
 
 The watcher needs the identifier's log, at least its inception, to know its witnesses, and the
-witnesses' `/loc/scheme` replies to reach them; until both are sent to it, the identifier is
-skipped.
+witnesses' `/loc/scheme` replies to reach them; until it has both, the identifier is skipped.
+
+## OOBIs
+
+A registration may carry an OOBI for the observed identifier. The watcher fetches it and ingests
+what it serves: from a keripy witness's `/oobi/{identifier}/witness`, the identifier's log and the
+witnesses' locations, which is what it needs to observe the identifier. The registration itself
+is verified against the controller's log, so, as `kli watcher add` does, the controller sends its
+log before the registration.
+
+As keripy does, an OOBI answered `404` is asked again every 30 seconds, three times at most, and
+one answered with another error status fails; a request that times out or cannot be sent is asked
+again as a `404` is. What became of each OOBI is kept in memory, so after a restart the queued
+OOBIs are fetched once more.
+
+## Escrows
+
+Every minute, the watcher drops what has waited in keri-kel's escrows longer than
+`escrow_timeout_seconds`, then retries the rest. keripy gives each escrow its own timeout; here
+one applies to all.
 
 ## Queries
 

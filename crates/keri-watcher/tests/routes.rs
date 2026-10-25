@@ -7,6 +7,7 @@ use std::sync::Arc;
 use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
+use chrono::{DateTime, Utc};
 use http_body_util::BodyExt;
 use keri_cesr::crypto::digest::{Digest, DigestAlgorithm};
 use keri_cesr::crypto::signer::{SignaturePlacement, Signer};
@@ -56,7 +57,8 @@ fn watcher() -> Result<(Router, IdentifierPrefix), Failure> {
     let identity = Identity::from_signer(signer(30, KeyTransferability::NonTransferable)?)?;
     let id = identity.prefix().clone();
     let kevery = Kevery::with_store(RedbStore::in_memory()?);
-    let watcher = Watcher::new(identity, kevery, Box::new(|| Timestamp::parse(STAMP)));
+    let at: DateTime<Utc> = STAMP.parse()?;
+    let watcher = Watcher::new(identity, kevery, Box::new(move || at));
     Ok((http::router(Arc::new(watcher)), id))
 }
 

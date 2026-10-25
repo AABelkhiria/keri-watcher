@@ -13,6 +13,9 @@
 //! poll_interval_seconds = 60
 //! # How long to wait for a witness's answer. 5 by default.
 //! witness_timeout_seconds = 5
+//! # How long an escrowed event, receipt, reply or query waits before it is dropped. 3600 by
+//! # default.
+//! escrow_timeout_seconds = 3600
 //! ```
 
 use std::net::SocketAddr;
@@ -48,6 +51,9 @@ pub struct Config {
     /// How long, in seconds, to wait for a witness's answer.
     #[serde(default = "default_witness_timeout")]
     pub witness_timeout_seconds: u64,
+    /// How long, in seconds, an escrowed event, receipt, reply or query waits before it is dropped.
+    #[serde(default = "default_escrow_timeout")]
+    pub escrow_timeout_seconds: u64,
 }
 
 const fn default_poll_interval() -> u64 {
@@ -56,6 +62,10 @@ const fn default_poll_interval() -> u64 {
 
 const fn default_witness_timeout() -> u64 {
     5
+}
+
+const fn default_escrow_timeout() -> u64 {
+    3600
 }
 
 impl Config {
@@ -102,6 +112,12 @@ impl Config {
     #[must_use]
     pub const fn witness_timeout(&self) -> Duration {
         Duration::from_secs(self.witness_timeout_seconds)
+    }
+
+    /// Returns how long an escrowed event, receipt, reply or query waits before it is dropped.
+    #[must_use]
+    pub const fn escrow_timeout(&self) -> Duration {
+        Duration::from_secs(self.escrow_timeout_seconds)
     }
 
     /// Returns whose key state notices to keep.

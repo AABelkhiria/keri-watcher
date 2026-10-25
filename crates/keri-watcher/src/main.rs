@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use keri_watcher::{Config, HttpClient, Observer, Poller, Watcher, WatcherError, http};
+use keri_watcher::{Config, HttpClient, Observer, Poller, Resolver, Watcher, WatcherError, http, sweeper};
 use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 
@@ -43,21 +43,24 @@ async fn run(path: PathBuf) -> Result<(), WatcherError> {
         .map_err(|source| WatcherError::Serve { source })?;
     info!(%prefix, listen = %config.listen, "watcher started");
     let watcher = Arc::new(watcher);
+    let client = HttpClient::new()?;
+    let mut tasks = vec![
+        tokio::spawn(Resolver::new(Arc::clone(&watcher), client.clone(), config.witness_timeout()).run()),
+        tokio::spawn(sweeper::run(Arc::clone(&watcher), config.escrow_timeout())),
+    ];
     let policy = config.poll_policy();
-    let poller = (!policy.is_disabled())
-        .then(|| {
-            let observer = Observer::new(Arc::clone(&watcher), HttpClient::new()?, config.witness_timeout());
-            Ok::<_, WatcherError>(tokio::spawn(Poller::new(Arc::clone(&watcher), observer, policy).run()))
-        })
-        .transpose()?;
+    if !policy.is_disabled() {
+        let observer = Observer::new(Arc::clone(&watcher), client, config.witness_timeout());
+        tasks.push(tokio::spawn(Poller::new(Arc::clone(&watcher), observer, policy).run()));
+    }
     let served = axum::serve(listener, http::router(watcher))
         .with_graceful_shutdown(async {
             let _ = tokio::signal::ctrl_c().await;
         })
         .await
         .map_err(|source| WatcherError::Serve { source });
-    if let Some(poller) = poller {
-        poller.abort();
+    for task in tasks {
+        task.abort();
     }
     served
 }
