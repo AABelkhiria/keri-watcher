@@ -1,0 +1,168 @@
+name: Release
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  # The crates this workflow publishes, in dependency order. Every other workspace member must
+  # carry `publish = false`.
+  CRATES: keri-store-redb keri-watch keri-watcher
+
+jobs:
+  # Runs the dependency policy fresh on the commit being released; the scheduled and path-filtered
+  # Supply chain runs may not cover it.
+  supply-chain:
+    name: Supply chain
+    uses: ./.github/workflows/supply-chain.yml
+
+  verify:
+    name: Verify release candidate
+    needs: supply-chain
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read # read the Rust workflow conclusion
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Rust
+        run: rustup toolchain install stable --profile minimal
+
+      - name: Require a green Rust run for this commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          runs="$(gh api \
+            "repos/${GITHUB_REPOSITORY}/actions/workflows/rust.yml/runs?head_sha=${GITHUB_SHA}&status=completed" \
+            --jq '.workflow_runs | map({conclusion, html_url})')"
+
+          if [ "$(echo "$runs" | jq 'length')" -eq 0 ]; then
+            echo "no completed Rust run for ${GITHUB_SHA}" >&2
+            echo "push the commit and let that workflow finish before releasing" >&2
+            exit 1
+          fi
+
+          conclusion="$(echo "$runs" | jq -r '.[0].conclusion')"
+          if [ "$conclusion" != "success" ]; then
+            echo "Rust concluded '${conclusion}' for ${GITHUB_SHA}" >&2
+            echo "$runs" | jq -r '.[0].html_url' >&2
+            exit 1
+          fi
+
+          echo "Rust passed for ${GITHUB_SHA}"
+
+      - name: Read the shared version from the workspace
+        id: version
+        run: |
+          metadata="$(cargo metadata --format-version 1 --no-deps --locked)"
+
+          # `publish = false` in a manifest would make `cargo publish` skip that package silently,
+          # so the set of publishable packages must be exactly the one this workflow expects.
+          publishable="$(echo "$metadata" | jq -r '[.packages[] | select(.publish == null) | .name] | sort | join(" ")')"
+          expected="$(echo "$CRATES" | tr ' ' '\n' | sort | tr '\n' ' ' | sed 's/ $//')"
+          if [ "$publishable" != "$expected" ]; then
+            echo "publishable packages are '${publishable}', expected '${expected}'" >&2
+            exit 1
+          fi
+
+          versions="$(echo "$metadata" | jq -r '[.packages[] | select(.publish == null) | .version] | unique | join(" ")')"
+          case "$versions" in
+            "" | null) echo "could not read the package versions from the manifests" >&2; exit 1 ;;
+            *" "*)     echo "the publishable crates disagree on the version: ${versions}" >&2; exit 1 ;;
+          esac
+
+          echo "version=$versions" >> "$GITHUB_OUTPUT"
+          echo "preparing to release ${CRATES} ${versions}"
+
+      - name: Refuse to republish an existing version
+        run: |
+          version='${{ steps.version.outputs.version }}'
+          for crate in $CRATES; do
+            status="$(curl -sS -o /dev/null -w '%{http_code}' \
+              -H 'User-Agent: keri-watcher release workflow' \
+              "https://crates.io/api/v1/crates/${crate}/${version}")"
+            case "$status" in
+              404) echo "${crate} ${version} is not on crates.io yet" ;;
+              200) echo "${crate} ${version} is already published; bump the workspace version first" >&2; exit 1 ;;
+              *)   echo "unexpected status ${status} from crates.io for ${crate}" >&2; exit 1 ;;
+            esac
+          done
+
+      - name: Confirm the changelog documents this version
+        run: |
+          version='${{ steps.version.outputs.version }}'
+          if ! grep -qF "## [${version}]" CHANGELOG.md; then
+            echo "CHANGELOG.md has no '## [${version}]' section" >&2
+            exit 1
+          fi
+
+      - name: Review the package contents
+        run: |
+          for crate in $CRATES; do
+            echo "::group::${crate}"
+            cargo package -p "$crate" --list --locked
+            echo "::endgroup::"
+          done
+
+      - name: Dry-run the publish
+        run: cargo publish --workspace --dry-run --locked
+
+  publish:
+    name: Publish ${{ needs.verify.outputs.version }}
+    needs: verify
+    runs-on: ubuntu-latest
+    environment: crates-io
+    permissions:
+      contents: write # create the tag and the GitHub release
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Rust
+        run: rustup toolchain install stable --profile minimal
+
+      # Uploads in dependency order. If a later upload fails after an earlier one landed, the
+      # "already published" gate above refuses a rerun: finish by hand with
+      # `cargo publish -p <crate> --locked` for the crates still missing, then tag and create the
+      # release the way the two steps below do.
+      - name: Publish to crates.io
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          if [ -z "${CARGO_REGISTRY_TOKEN}" ]; then
+            echo "CARGO_REGISTRY_TOKEN is not set on the crates-io environment" >&2
+            exit 1
+          fi
+          cargo publish --workspace --locked
+
+      - name: Tag the published commit
+        run: |
+          version='${{ needs.verify.outputs.version }}'
+          git tag "v${version}" "${GITHUB_SHA}"
+          git push origin "v${version}"
+
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version='${{ needs.verify.outputs.version }}'
+          awk -v ver="## [${version}]" '
+            index($0, ver) == 1 { inside = 1; next }
+            inside && /^## \[/ { exit }
+            inside { print }
+          ' CHANGELOG.md > "${RUNNER_TEMP}/notes.md"
+          prerelease=""
+          case "$version" in *-*) prerelease="--prerelease" ;; esac
+          gh release create "v${version}" \
+            --title "v${version}" \
+            --notes-file "${RUNNER_TEMP}/notes.md" \
+            ${prerelease}
